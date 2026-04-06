@@ -1,0 +1,39 @@
+name: cloud-alert-triage
+version: "1.0.0"
+description: >
+  An SRE alert triage environment where an AI agent must classify,
+  prioritize, and remediate cloud infrastructure monitoring alerts
+  across a microservice dependency graph.
+
+author: Better Call Coders
+
+tags:
+  - sre
+  - devops
+  - incident-response
+
+# Required core fields (very important)
+reward_range: [0, 1]
+max_steps: 50
+grader: deterministic
+
+tasks:
+  - id: easy
+    title: Basic Alert Classification
+    description: Triage 5 independent alerts with clear root causes.
+
+  - id: medium
+    title: Correlated Incident Response
+    description: Triage 15 alerts including 2 correlated incidents and false alarms.
+
+  - id: hard
+    title: Cascading Failure Under Noise
+    description: Triage 30 alerts with 5 cascading incidents, noise, and misleading severity.
+
+# Keep minimal for compatibility
+action_space: {}
+observation_space: {}
+
+endpoints:
+  reset: /reset
+  step: /step

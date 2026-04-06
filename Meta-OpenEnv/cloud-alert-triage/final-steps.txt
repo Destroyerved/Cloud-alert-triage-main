@@ -1,0 +1,387 @@
+# Cloud Alert Triage — Human Operator Runbook
+# Final steps from current state to submission
+
+================================================================================
+CURRENT OBJECTIVE
+================================================================================
+
+Push the finished Cloud Alert Triage OpenEnv environment to Hugging Face Spaces
+and submit it for the OpenEnv Hackathon. The code is complete and validated.
+All 232 tests pass. openenv validate passes. The smoke test passes 27/27.
+Docker and HF deployment are the only remaining steps.
+
+WHAT "DONE" MEANS:
+  - A public HF Space (Docker type) at a URL like
+    https://huggingface.co/spaces/<YOUR_HF_USERNAME>/cloud-alert-triage
+  - The Space is built and healthy: GET /health returns {"status":"ok"}
+  - POST /reset?task_id=easy&seed=42 returns the correct observation
+  - inference.py has been run against the live Space and baseline scores
+    are recorded in README.md
+  - The repo is pushed to GitHub (optional but recommended)
+
+================================================================================
+SECTION 1 — LOCAL ENVIRONMENT SETUP
+================================================================================
+
+[ ] 1.1  Make sure you are in the project root:
+         cd "C:\Users\mekha\OneDrive\Desktop\Projects\Meta-OpenEnv\cloud-alert-triage"
+
+[ ] 1.2  Activate (or create) a virtual environment:
+         # Create (only if not already done):
+         python -m venv .venv
+
+         # Activate on Windows:
+         .venv\Scripts\activate
+
+         # Activate on Mac/Linux:
+         source .venv/bin/activate
+
+[ ] 1.3  Install dependencies:
+         pip install -r requirements.txt
+
+================================================================================
+SECTION 2 — RUN TESTS
+================================================================================
+
+[ ] 2.1  Run the full test suite:
+         pytest tests/ -q
+
+         Expected: 232 passed in ~1s
+         If anything fails, see "WHAT TO CHECK IF SOMETHING FAILS" below.
+
+================================================================================
+SECTION 3 — START SERVER LOCALLY AND VALIDATE ENDPOINTS
+================================================================================
+
+[ ] 3.1  Start the server:
+         python -m uvicorn server.app:app --host 0.0.0.0 --port 7860
+
+         Leave this terminal open. Open a second terminal for the next steps.
+
+[ ] 3.2  Test /health:
+         curl http://localhost:7860/health
+         Expected: {"status":"ok"}
+
+[ ] 3.3  Test /reset:
+         curl -s -X POST http://localhost:7860/reset \
+           -H "Content-Type: application/json" \
+           -d '{"task_id":"easy","seed":42}' | python -m json.tool
+         Expected: JSON with observation.alerts (5 items), pending_count=5
+
+[ ] 3.4  Test /step (use an alert_id from the reset response, e.g. "alert-001"):
+         curl -s -X POST http://localhost:7860/step \
+           -H "Content-Type: application/json" \
+           -d '{"action_type":"triage","alert_id":"alert-001","root_cause":"resource_exhaustion","severity":"high","remediation":"scale_up"}' \
+           | python -m json.tool
+         Expected: JSON with reward (float), done (bool), observation
+
+[ ] 3.5  Test /state:
+         curl http://localhost:7860/state | python -m json.tool
+         Expected: JSON with ground_truth, task_id, seed, step_number
+
+[ ] 3.6  Run the full smoke test (server must be running):
+         python scripts/smoke_test.py
+         Expected: 27/27 PASS, exit 0
+
+[ ] 3.7  Run openenv validate:
+         python -m openenv.cli validate
+         Expected: "[OK] cloud-alert-triage: Ready for multi-mode deployment"
+
+[ ] 3.8  Stop the server (Ctrl+C in that terminal).
+
+================================================================================
+SECTION 4 — DOCKER BUILD AND RUN
+================================================================================
+
+[ ] 4.1  Make sure Docker Desktop is running (open it from the Start menu and
+         wait for the whale icon to show "Docker Desktop is running").
+
+[ ] 4.2  Build the image:
+         docker build -t cloud-alert-triage .
+         This will take 1–3 minutes on first run (downloads python:3.11-slim).
+
+[ ] 4.3  Run the container:
+         docker run --rm -p 7860:7860 cloud-alert-triage
+
+[ ] 4.4  In a second terminal, test the containerised server:
+         curl http://localhost:7860/health
+         Expected: {"status":"ok"}
+
+         curl -s -X POST http://localhost:7860/reset \
+           -H "Content-Type: application/json" \
+           -d '{"task_id":"easy","seed":42}' | python -m json.tool
+
+[ ] 4.5  Stop the container (Ctrl+C).
+
+================================================================================
+SECTION 5 — RUN inference.py AND RECORD BASELINE SCORES
+================================================================================
+
+[ ] 5.1  Export required environment variables (replace placeholders):
+         # Windows cmd:
+         set OPENAI_API_KEY=sk-...
+         set MODEL_NAME=gpt-4o-mini
+         set API_BASE_URL=https://api.openai.com/v1
+         set ENV_URL=http://localhost:7860
+
+         # Or Windows PowerShell:
+         $env:OPENAI_API_KEY="sk-..."
+         $env:MODEL_NAME="gpt-4o-mini"
+         $env:API_BASE_URL="https://api.openai.com/v1"
+         $env:ENV_URL="http://localhost:7860"
+
+         # Or bash/Mac/Linux:
+         export OPENAI_API_KEY=sk-...
+         export MODEL_NAME=gpt-4o-mini
+         export API_BASE_URL=https://api.openai.com/v1
+         export ENV_URL=http://localhost:7860
+
+         If using a Hugging Face-hosted model instead of OpenAI:
+           export OPENAI_API_KEY=hf_...        (or HF_TOKEN=hf_...)
+           export API_BASE_URL=https://api-inference.huggingface.co/v1
+           export MODEL_NAME=meta-llama/Llama-3.2-3B-Instruct   # or any compatible model
+
+[ ] 5.2  Start the server in one terminal:
+         python -m uvicorn server.app:app --host 0.0.0.0 --port 7860
+
+[ ] 5.3  Run inference.py in a second terminal:
+         python inference.py
+
+         Watch for structured log output:
+           [START] {"task":"easy","env":"cloud-alert-triage","model":"gpt-4o-mini"}
+           [STEP] {"step":1,"action":{...},"reward":0.8,"done":false,"error":null}
+           ...
+           [END] {"success":true,"steps":5,"score":0.92,"rewards":[...]}
+
+         The script runs all three tasks (easy → medium → hard).
+         Each task has a 6-minute budget; total budget is 20 minutes.
+
+[ ] 5.4  Record the grader scores from each [END] line and fill in README.md:
+
+         Open README.md, find the "Baseline Scores" table:
+
+         | Task   | Model        | Grader Score | Steps Used |
+         |--------|--------------|--------------|------------|
+         | easy   | gpt-4o-mini  | <FILL IN>    | <FILL IN>  |
+         | medium | gpt-4o-mini  | <FILL IN>    | <FILL IN>  |
+         | hard   | gpt-4o-mini  | <FILL IN>    | <FILL IN>  |
+
+         Replace "<FILL IN>" with the actual values from the [END] log lines.
+
+[ ] 5.5  Stop the local server (Ctrl+C).
+
+================================================================================
+SECTION 6 — PREPARE GIT REPOSITORY
+================================================================================
+
+[ ] 6.1  Check git status (run from the project root):
+         git status
+
+         If this is not a git repo yet:
+           git init
+           git add .
+           git commit -m "Initial commit: Cloud Alert Triage OpenEnv environment"
+
+[ ] 6.2  If git is already initialised, stage all changes:
+         git add .
+         git status    # review what will be committed
+
+[ ] 6.3  Commit:
+         git commit -m "Final: all validation passing, baseline scores recorded"
+
+[ ] 6.4  (Optional) Push to GitHub:
+         # Create a new repo at https://github.com/new first, then:
+         git remote add origin https://github.com/<YOUR_GITHUB_USERNAME>/cloud-alert-triage.git
+         git branch -M main
+         git push -u origin main
+
+================================================================================
+SECTION 7 — CREATE AND DEPLOY TO HUGGING FACE SPACE
+================================================================================
+
+[ ] 7.1  Log in to Hugging Face (if not already):
+         pip install huggingface_hub
+         huggingface-cli login
+         # Paste your HF token (hf_...) when prompted
+
+[ ] 7.2  Create the Space via the HF web UI:
+         - Go to https://huggingface.co/new-space
+         - Space name:  cloud-alert-triage
+         - SDK:         Docker   ← IMPORTANT: must be "Docker", not Gradio or Streamlit
+         - Visibility:  Public
+         - Click "Create Space"
+
+[ ] 7.3  Add the HF Space as a git remote and push:
+         git remote add space https://huggingface.co/spaces/<YOUR_HF_USERNAME>/cloud-alert-triage
+         git push space main
+
+         If you need to force push (e.g. history mismatch):
+           git push space main --force
+
+[ ] 7.4  Monitor the build:
+         - Go to https://huggingface.co/spaces/<YOUR_HF_USERNAME>/cloud-alert-triage
+         - Click the "Logs" tab
+         - Wait for "Container started" or similar success message
+         - Typical build time: 2–5 minutes
+
+[ ] 7.5  Verify the live Space:
+         curl https://<YOUR_HF_USERNAME>-cloud-alert-triage.hf.space/health
+         Expected: {"status":"ok"}
+
+         curl -s -X POST https://<YOUR_HF_USERNAME>-cloud-alert-triage.hf.space/reset \
+           -H "Content-Type: application/json" \
+           -d '{"task_id":"easy","seed":42}'
+         Expected: {"observation":{...}}
+
+[ ] 7.6  (Optional) Run inference.py against the live Space:
+         export ENV_URL=https://<YOUR_HF_USERNAME>-cloud-alert-triage.hf.space
+         python inference.py
+         Update README.md baseline scores table if scores differ.
+
+================================================================================
+SECTION 8 — FINAL REVIEW BEFORE SUBMISSION
+================================================================================
+
+[ ] 8.1  Verify openenv.yaml has the correct Space URL if required by submission form.
+
+[ ] 8.2  Check README.md:
+         - Baseline scores table is filled in (not "pending live run")
+         - HF Space URL is mentioned or easily discoverable
+         - All sections present: Architecture, Observation Space, Action Space,
+           Tasks, Reward Design, Grader, API Reference, Setup, Docker, Baseline Scores
+
+[ ] 8.3  Final git commit with any README updates:
+         git add README.md
+         git commit -m "docs: record baseline scores"
+         git push origin main        # GitHub (if used)
+         git push space main         # HF Space
+
+[ ] 8.4  Submit:
+         Fill in the hackathon submission form with:
+         - HF Space URL
+         - GitHub repo URL (if required)
+         - Team name: Better Call Coders
+
+================================================================================
+HUMAN INPUTS I MAY STILL NEED
+================================================================================
+
+OPENAI_API_KEY     Your OpenAI API key (sk-...) OR a Hugging Face token (hf_...)
+                   used as the API key for an HF Inference API compatible endpoint.
+
+API_BASE_URL       Default: https://api.openai.com/v1
+                   For HF Inference API: https://api-inference.huggingface.co/v1
+                   For a custom/local endpoint: http://localhost:8080/v1
+
+MODEL_NAME         Default: gpt-4o-mini
+                   Any model supported by the API base URL you are using.
+                   Examples: gpt-4o, gpt-4-turbo, meta-llama/Llama-3.2-3B-Instruct
+
+HF_TOKEN           Your Hugging Face token (hf_...) — needed to push to HF Spaces
+                   and optionally as a fallback API key.
+                   Get it at: https://huggingface.co/settings/tokens
+
+HF_USERNAME        Your HF username — used in Space URL and git remote.
+                   Example: if your profile is huggingface.co/alice, it is "alice".
+
+HF_SPACE_URL       Will be: https://huggingface.co/spaces/<HF_USERNAME>/cloud-alert-triage
+                   Live API base: https://<HF_USERNAME>-cloud-alert-triage.hf.space
+
+GITHUB_REPO_URL    Optional. If pushing to GitHub:
+                   https://github.com/<YOUR_GITHUB_USERNAME>/cloud-alert-triage
+
+================================================================================
+WHAT TO CHECK IF SOMETHING FAILS
+================================================================================
+
+TESTS FAILING (pytest)
+  - Run `pytest tests/ -v` to see which test fails.
+  - Most likely cause: a file was accidentally modified. Check git diff.
+  - If test_environment.py fails: the rewards or grading behaviour may have drifted.
+  - If test_graders.py fails: check server/grading.py was not overwritten.
+
+IMPORT ERRORS (ModuleNotFoundError)
+  - Make sure venv is activated and `pip install -r requirements.txt` was run.
+  - Check Python version: `python --version` — must be 3.9 or higher.
+
+/reset NOT RETURNING 200
+  - Make sure the server is running: `python -m uvicorn server.app:app --port 7860`
+  - Check for port conflict: `netstat -ano | findstr 7860` (Windows)
+    Kill or use a different port: `--port 7861` and set `ENV_URL=http://localhost:7861`
+  - Check server logs — an import error at startup will appear in stderr.
+
+DOCKER BUILD ERRORS
+  - "Cannot connect to Docker daemon" → Docker Desktop is not running. Open it.
+  - pip install fails in Dockerfile → check requirements.txt versions.
+    Try adding `--no-cache-dir` (already present) and check network access.
+  - "COPY failed" → make sure .dockerignore is not accidentally excluding needed files.
+
+SPACE BUILD FAILURES (HF Logs)
+  - Check the Logs tab on the Space page.
+  - "pip install failed" → same as Docker build errors above.
+  - "port 7860 not listening" → the CMD in Dockerfile must bind to 0.0.0.0:7860.
+    Current CMD: ["uvicorn","server.app:app","--host","0.0.0.0","--port","7860"] ✓
+  - Build timeout → Space free tier has limited CPU. Try again; if persistent,
+    check if a dependency is being compiled from source (add a prebuilt wheel).
+
+openenv VALIDATE FAILURE
+  - Run: `python -m openenv.cli validate`
+  - If "field required" error → a required field is missing from openenv.yaml.
+    Compare against the current openenv.yaml in the repo.
+  - If "unknown field" error → remove the offending field from openenv.yaml.
+  - The current openenv.yaml passes with: [OK] cloud-alert-triage: Ready for multi-mode deployment
+
+INFERENCE AUTH FAILURE (401 / AuthenticationError)
+  - Check OPENAI_API_KEY is exported and non-empty: `echo $OPENAI_API_KEY`
+  - If using HF Inference API, make sure the model is available on free tier.
+  - Check API_BASE_URL ends with /v1 (no trailing slash issues).
+
+BAD LOGGING FORMAT
+  - inference.py must emit exactly:
+      [START] {"task":"...","env":"cloud-alert-triage","model":"..."}
+      [STEP] {"step":N,"action":{...},"reward":F,"done":B,"error":null}
+      [END] {"success":B,"steps":N,"score":F,"rewards":[...]}
+  - Check that inference.py has not been replaced. The current version uses
+    `from openai import OpenAI` and the log_start/log_step/log_end functions.
+  - Run: `python -c "import inference; print('OK')"` to check for import errors.
+
+================================================================================
+FINAL DEFINITION OF DONE
+================================================================================
+
+Submission is complete when ALL of the following are true:
+
+Code quality:
+  [ ] pytest tests/ -q shows 232 passed, 0 failed
+  [ ] python -m openenv.cli validate shows [OK]
+  [ ] No syntax errors: python -m py_compile inference.py server/app.py server/grading.py
+
+Local API:
+  [ ] GET /health → {"status":"ok"}
+  [ ] POST /reset (easy, seed=42) → observation with 5 alerts
+  [ ] POST /step (valid triage) → reward (float), done (bool)
+  [ ] scripts/smoke_test.py → 27/27 PASS
+
+Docker:
+  [ ] docker build -t cloud-alert-triage . completes without error
+  [ ] docker run --rm -p 7860:7860 cloud-alert-triage starts the server
+  [ ] curl http://localhost:7860/health → {"status":"ok"} from the container
+
+inference.py:
+  [ ] python inference.py runs without crashing
+  [ ] [START], [STEP], [END] log lines appear in correct format
+  [ ] [END] "score" field is the grader_score (float in [0.0, 1.0]), not avg reward
+
+README:
+  [ ] Baseline scores table filled in (not "pending live run")
+  [ ] All sections complete and accurate
+
+Deployment:
+  [ ] HF Space exists and is public
+  [ ] Space type is Docker
+  [ ] GET https://<HF_USERNAME>-cloud-alert-triage.hf.space/health → {"status":"ok"}
+  [ ] POST /reset on live Space returns correct observation
+
+Submission:
+  [ ] Hackathon submission form completed with HF Space URL
+  [ ] Team name "Better Call Coders" entered

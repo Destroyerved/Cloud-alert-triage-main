@@ -1,0 +1,20 @@
+{
+  "task_id": "medium",
+  "title": "Correlated Incident Response",
+  "description": "Triage 15 alerts across 10 services. Two distinct incidents each cascade through 3-4 dependent services. Also includes 2 independent alerts and 1-2 false alarms with borderline metrics. Agent must use the service dependency graph to identify correlated alerts.",
+  "difficulty": "medium",
+  "default_seed": 42,
+  "num_alerts": 15,
+  "num_incidents": 2,
+  "noise_alerts": 2,
+  "max_steps": 25,
+  "expected_score_range": [0.65, 0.85],
+  "grader_weights": {
+    "root_cause_accuracy": 0.30,
+    "severity_accuracy": 0.20,
+    "remediation_accuracy": 0.20,
+    "incident_link_f1": 0.20,
+    "false_alarm_accuracy": 0.10,
+    "stealth_bonus": 0.00
+  }
+}
