@@ -346,9 +346,9 @@ Scores recorded with `seed=42`, `temperature=0`, `MODEL_NAME=llama-3.3-70b-versa
 
 | Task | Model | Grader Score | Steps Used |
 |---|---|---|---|
-| easy | llama-3.3-70b-versatile | 0.772 | 6 |
-| medium | llama-3.3-70b-versatile | 0.5915 | 25 |
-| hard | llama-3.3-70b-versatile | 0.3154 | 45 |
+| easy | llama-3.3-70b-versatile | 0.632 | 6 |
+| medium | llama-3.3-70b-versatile | 1.000 | 25 |
+| hard | llama-3.3-70b-versatile | 0.515 | 45 |
 
 > **Expected ranges** (strong frontier LLM): easy 0.85–1.0 · medium 0.65–0.85 · hard 0.40–0.65
 
