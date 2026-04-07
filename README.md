@@ -1,3 +1,13 @@
+---
+title: CloudAlert Triage AI
+emoji: 🚀
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Cloud Alert Triage — OpenEnv Environment
 
 > **OpenEnv hackathon submission · Better Call Coders**
