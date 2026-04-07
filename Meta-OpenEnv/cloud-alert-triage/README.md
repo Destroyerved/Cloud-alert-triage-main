@@ -1,13 +1,3 @@
----
-title: CloudAlert Triage AI
-emoji: 🚀
-colorFrom: blue
-colorTo: purple
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Cloud Alert Triage — OpenEnv Environment
 
 > **OpenEnv hackathon submission · Better Call Coders**
@@ -18,11 +8,7 @@ An SRE alert triage environment where an AI agent must classify, prioritise, and
 
 ## Why This Matters
 
-On-call SRE teams face crippling **alert fatigue** and **incident overload**. They triage hundreds of alerts per day, where a single missed cascading failure can cost millions of dollars in downtime, while over-reacting to false alarms quickly burns out engineering teams. 
-
-Existing AI benchmarks dramatically **under-test sequential infrastructure reasoning**. Most standard benchmarks evaluate model capabilities on static multiple-choice questions or isolated code generation tasks. They fail to test temporal, multi-hop operational reasoning where the root cause of an outage might be buried beneath layers of noisy, symptomatic alerts across a microservice graph.
-
-This environment models that exact workflow—offering AI agents a realistic, dynamically graded triage challenge. The capability gap between the `easy` task (isolated alerts) and the `hard` task (interleaved, cascading, stealthy failures) provides a defining benchmark story reflecting true frontier SRE capabilities.
+On-call SRE teams triage hundreds of alerts per day. Missing a cascading failure costs millions in downtime; over-reacting to false alarms burns out engineers. This environment models that exact workflow — giving AI agents a realistic, graded triage challenge across three difficulty levels.
 
 ---
 
@@ -36,16 +22,16 @@ This environment models that exact workflow—offering AI agents a realistic, dy
 │  GET  /state ──► AlertTriageEnv.state()  (debug)    │
 │  GET  /health──► {"status": "ok"}                   │
 └──────────┬──────────────────────────────────────────┘
-            │
-     ┌──────▼──────┐   ┌───────────────┐   ┌──────────────┐
-     │  Environment │──►│scenario_genera│   │  grading.py  │
-     │    Core      │   │     tor.py    │   │ (end-of-ep.) │
-     └──────┬───────┘   └───────────────┘   └──────────────┘
-            │
-     ┌──────▼───────┐
-     │  rewards.py  │
-     │ (per-step)   │
-     └──────────────┘
+           │
+    ┌──────▼──────┐   ┌───────────────┐   ┌──────────────┐
+    │  Environment │──►│scenario_genera│   │  grading.py  │
+    │    Core      │   │     tor.py    │   │ (end-of-ep.) │
+    └──────┬───────┘   └───────────────┘   └──────────────┘
+           │
+    ┌──────▼───────┐
+    │  rewards.py  │
+    │ (per-step)   │
+    └──────────────┘
 ```
 
 Scenario generation is fully deterministic given `(task_id, seed)`.
@@ -145,9 +131,6 @@ All actions share a single model with an `action_type` discriminator.
 ### hard
 30 alerts across 15 services. Five cascading incidents with 3–5 hop cascades. Six false alarms — one misleadingly marked `critical` by the monitoring system. One "stealth" incident where the root service shows only subtle degradation while dependents fail loudly. Alerts are temporally interleaved (not in causal order). Tight step budget (45 steps for 30 alerts + linking).
 
-### The "Stealth" Incident Mechanic
-The `hard` task features a unique "stealth" incident to test deep multi-hop reasoning. In a stealth incident, the root service only weakly signals failure (e.g., a "gradual memory leak" that appears benign or medium-severity). Conversely, its downstream dependent services emit *louder, critical* failure signals. Naive LLMs or heuristic agents will chase symptoms and triage the downstream services as the root cause, leading to deep penalties. Successfully solving this requires a model to ignore the loud symptoms, trace the dependency graph upstream, and address the actual root cause.
-
 ---
 
 ## Reward Design
@@ -160,7 +143,7 @@ Rewards are issued **per step** to guide the agent. The final grader score is co
 |---|---|---|
 | `triage` | `root_cause` exact match | +0.30 |
 | `triage` | `severity` exact match | +0.30 |
-| `triage` | `severity` within 1 level | +0.15 |
+| `triage` | `severity` within 1 level | +0.10 |
 | `triage` | `remediation` exact match | +0.20 |
 | `triage` | alert is in an incident the agent already linked correctly | +0.10 bonus |
 | `link_alerts` | correct pair (both alerts in same true incident) | +0.15 per pair |
@@ -175,18 +158,6 @@ Rewards are issued **per step** to guide the agent. The final grader score is co
 | Step ≥ 80% of step budget | −0.05 per step |
 | Invalid action format | −0.10 |
 | Triaging an already-triaged alert | −0.15 |
-
-### Dynamic cascade mechanic
-
-If an original **critical** or **high** severity alert remains untriaged after **step 5**, the environment spawns one new dependent alert on a downstream service chosen deterministically from the service graph. This models the real-world behaviour where unresolved infrastructure issues propagate to dependent services.
-
-**Rules:**
-- Only original scenario alerts (not previously spawned dynamic alerts) are eligible.
-- Each originating alert spawns **at most one** dynamic alert (prefix `dyn-`).
-- The downstream service is chosen as the first alphabetical dependent of the alert's service in the service graph.
-- Dynamic alerts participate in **per-step rewards** (they behave like normal alerts).
-- Dynamic alerts are **excluded from the final grader score** — the grader evaluates only original scenario alerts. This ensures deterministic grading while still creating reactive pressure through the per-step reward pipeline.
-- The agent receives feedback when cascade alerts are spawned.
 
 ---
 
@@ -208,12 +179,11 @@ The grader computes a deterministic score in **[0.0, 1.0]** from the final episo
 ### Accuracy definitions
 
 - **root_cause_accuracy** — fraction of alerts with correct root cause
-- **severity_accuracy** — per alert: +1.0 exact, +0.15 within 1 level, +0.0 otherwise; averaged
+- **severity_accuracy** — per alert: +1.0 exact, +0.5 within 1 level, +0.0 otherwise; averaged
 - **remediation_accuracy** — fraction of alerts with correct remediation
 - **incident_link_f1** — F1 over alert-pair sets; 1.0 if no true incidents (vacuously correct)
-- **false_alarm_accuracy** — (correctly skipped FAs + correctly triaged real alerts) / total; 1.0 if no FAs. Includes a skip-ratio penalty: if >50% of alerts are skipped, the score is reduced proportionally (penalty = 1 - skip_ratio * 0.5).
+- **false_alarm_accuracy** — (correctly skipped FAs + correctly triaged real alerts) / total; 1.0 if no FAs
 - **stealth bonus** — +0.05 if the root cause service of the stealth incident was correctly identified
-- **Coverage Penalty** — The total accumulated score is multiplied by `coverage ^ 1.5` before the final stealth bonus is assigned. This strictly penalizes agents that ignore alerts to protect a partial high score.
 
 ---
 
@@ -278,10 +248,8 @@ pip install -r requirements.txt
 uvicorn server.app:app --host 0.0.0.0 --port 7860
 
 # Run the baseline agent (separate terminal)
-export HF_TOKEN=hf_...               # primary auth key (Linux/Mac)
-# PowerShell (Windows): $env:HF_TOKEN="hf_..."
+export OPENAI_API_KEY=sk-...
 export MODEL_NAME=gpt-4o-mini        # or any OpenAI-compatible model
-# PowerShell (Windows): $env:MODEL_NAME="gpt-4o-mini"
 python inference.py
 ```
 
@@ -290,11 +258,10 @@ python inference.py
 | Variable | Default | Description |
 |---|---|---|
 | `ENV_URL` | `http://localhost:7860` | URL of the running environment server |
-| `API_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible API base URL |
-| `MODEL_NAME` | `llama-3.3-70b-versatile` | Model name |
-| `GROQ_API_KEY` | — | Groq API key (recommended for free tier) |
-| `OPENAI_API_KEY` | — | OpenAI API key (fallback) |
-| `HF_TOKEN` | — | HuggingFace token (fallback) |
+| `API_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
+| `MODEL_NAME` | `gpt-4o-mini` | Model name |
+| `OPENAI_API_KEY` | — | API key (falls back to `HF_TOKEN`) |
+| `HF_TOKEN` | — | Hugging Face token (fallback auth) |
 
 ### Docker
 
@@ -318,36 +285,17 @@ curl -s -X POST http://localhost:7860/reset \
 pytest tests/ -v
 ```
 
-### Live Demo
-
-Try the API at: **https://notUbaid-cloudalert-triage-ai.hf.space**
-
-```bash
-# Health check
-curl https://notUbaid-cloudalert-triage-ai.hf.space/health
-
-# Reset easy task
-curl -X POST https://notUbaid-cloudalert-triage-ai.hf.space/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task_id": "easy", "seed": 42}'
-
-# Step (triage an alert)
-curl -X POST https://notUbaid-cloudalert-triage-ai.hf.space/step \
-  -H "Content-Type: application/json" \
-  -d '{"action_type": "triage", "alert_id": "alert-001", "root_cause": "resource_exhaustion", "severity": "high", "remediation": "scale_up"}'
-```
-
 ---
 
 ## Baseline Scores
 
-Scores recorded with `seed=42`, `temperature=0`, `MODEL_NAME=llama-3.3-70b-versatile`, `API_BASE_URL=https://api.groq.com/openai/v1`.
+Scores recorded with `seed=42`, `temperature=0`.
 
 | Task | Model | Grader Score | Steps Used |
 |---|---|---|---|
-| easy | llama-3.3-70b-versatile | 0.632 | 6 |
-| medium | llama-3.3-70b-versatile | 1.000 | 25 |
-| hard | llama-3.3-70b-versatile | 0.515 | 45 |
+| easy | _pending live run_ | — | — |
+| medium | _pending live run_ | — | — |
+| hard | _pending live run_ | — | — |
 
 > **Expected ranges** (strong frontier LLM): easy 0.85–1.0 · medium 0.65–0.85 · hard 0.40–0.65
 
@@ -374,7 +322,7 @@ cloud-alert-triage/
 │   ├── task_easy.json
 │   ├── task_medium.json
 │   └── task_hard.json
-└── tests/                    # 236 tests, all passing
+└── tests/                    # 232 tests, all passing
 ```
 
 ---

@@ -1,0 +1,89 @@
+Edit `final-steps.txt` only.
+
+Do not read `task.txt` first. Overwrite it completely.
+
+Use the current project state in the repository plus `MASTER_PLAN.md`, `PROGRESS.md`, and `MAP.md` as context, but do not modify any file except `final-steps.txt`.
+
+Write `final-steps.txt` as a human-only final action checklist from this point forward.
+
+Goal:
+Create a complete, precise, step-by-step operator runbook for me, the human, covering everything I need to do from now until final submission. It must assume the coding work is mostly done and now I need to validate, test, push, deploy, verify, and submit.
+
+The contents of `task.txt` must include:
+
+1. A short opening section:
+   - current objective
+   - what “done” means for this project
+
+2. A strict ordered checklist of human actions from now on, including:
+   - local environment setup if still needed
+   - dependency install
+   - running tests
+   - starting server locally
+   - testing `/reset`, `/step`, `/state`, `/health`
+   - validating `openenv.yaml`
+   - building Docker
+   - running Docker and testing endpoints
+   - setting environment variables for `inference.py`
+   - running `inference.py`
+   - checking required structured logs
+   - recording baseline scores
+   - reviewing README
+   - preparing git repo
+   - committing changes
+   - adding GitHub remote if needed
+   - pushing to GitHub
+   - creating Hugging Face Space
+   - configuring Hugging Face Space as Docker
+   - tagging/metadata if needed
+   - pushing code to Hugging Face Space
+   - waiting for build
+   - checking Space build logs
+   - testing live `/reset`
+   - final submission readiness check
+
+3. Exact shell commands wherever useful, using placeholders where needed:
+   - for venv creation/activation
+   - pip install
+   - pytest
+   - uvicorn
+   - curl examples
+   - docker build/run
+   - env var exports
+   - git init/status/add/commit/remote/push
+   - Hugging Face git remote push commands
+
+4. A section called:
+   `HUMAN INPUTS I MAY STILL NEED`
+   Include:
+   - OpenAI or compatible API key
+   - API base URL
+   - model name
+   - Hugging Face token
+   - Hugging Face Space URL
+   - GitHub repo URL
+   - anything else relevant
+
+5. A section called:
+   `WHAT TO CHECK IF SOMETHING FAILS`
+   Include common failures and where to look:
+   - tests failing
+   - import errors
+   - `/reset` not returning 200
+   - Docker build errors
+   - Space build failures
+   - `openenv validate` failure
+   - inference auth failure
+   - bad logging format
+
+6. A section called:
+   `FINAL DEFINITION OF DONE`
+   with checkboxes for all submission-critical requirements.
+
+Formatting requirements:
+- plain text or Markdown only
+- concise but complete
+- highly actionable
+- no filler
+- no code changes outside `task.txt`
+- no analysis in chat, just perform the file overwrite
