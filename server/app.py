@@ -96,8 +96,14 @@ async def runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResp
 
 @app.get("/health", summary="Liveness probe")
 async def health() -> dict[str, str]:
-    """Return 200 with {\"status\": \"ok\"} so load-balancers know the pod is alive."""
+    """Return 200 with {"status": "ok"} so load-balancers know the pod is alive."""
     return {"status": "ok"}
+
+
+@app.get("/", summary="Home")
+async def home() -> dict[str, str]:
+    """Return a welcome message for the root endpoint."""
+    return {"message": "CloudAlert Triage AI is running"}
 
 
 @app.post("/reset", summary="Start a new episode")
