@@ -1,0 +1,20 @@
+{
+  "task_id": "hard",
+  "title": "Cascading Failure Under Noise",
+  "description": "Triage 30 alerts across 15 services. Four to five distinct incidents with deep cascade chains (3-5 dependency hops). Five to eight noise/false-alarm alerts mixed in. Monitoring system mislabels one false alarm as 'critical'. Alerts are temporally interleaved across incidents. One stealth incident: root cause service shows subtle degradation while downstream dependents fail loudly. Tight step budget demands efficient triage — brute-force strategies fail.",
+  "difficulty": "hard",
+  "default_seed": 42,
+  "num_alerts": 30,
+  "num_incidents": 5,
+  "noise_alerts": 6,
+  "max_steps": 45,
+  "expected_score_range": [0.40, 0.65],
+  "grader_weights": {
+    "root_cause_accuracy": 0.25,
+    "severity_accuracy": 0.20,
+    "remediation_accuracy": 0.15,
+    "incident_link_f1": 0.25,
+    "false_alarm_accuracy": 0.10,
+    "stealth_bonus": 0.05
+  }
+}

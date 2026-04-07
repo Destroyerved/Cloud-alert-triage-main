@@ -1,0 +1,20 @@
+{
+  "task_id": "easy",
+  "title": "Basic Alert Classification",
+  "description": "Triage 5 independent alerts with clear, unambiguous root causes. No correlated incidents, no noise. Each alert has an obvious mapping from metric and message to root cause.",
+  "difficulty": "easy",
+  "default_seed": 42,
+  "num_alerts": 5,
+  "num_incidents": 0,
+  "noise_alerts": 0,
+  "max_steps": 10,
+  "expected_score_range": [0.85, 1.0],
+  "grader_weights": {
+    "root_cause_accuracy": 0.40,
+    "severity_accuracy": 0.30,
+    "remediation_accuracy": 0.30,
+    "incident_link_f1": 0.00,
+    "false_alarm_accuracy": 0.00,
+    "stealth_bonus": 0.00
+  }
+}

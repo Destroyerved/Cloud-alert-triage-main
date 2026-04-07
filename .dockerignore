@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Test cache and artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Git history (not needed in image)
+.git/
+.gitignore
+
+# Local env files (secrets must not enter image)
+.env
+*.env
+
+# Development-only docs / scripts output
+docs/
