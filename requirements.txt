@@ -2,6 +2,6 @@ openenv-core>=0.2.0
 openai>=2.7.2
 httpx>=0.28.1
 fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
+uvicorn[standard]>=0.35.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
