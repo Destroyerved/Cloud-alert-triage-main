@@ -109,7 +109,9 @@ async def list_tasks() -> list[dict[str, Any]]:
 
 
 @app.post("/reset", summary="Start a new episode (fixed task)")
-async def reset(body: ResetRequest) -> dict[str, Any]:
+async def reset(body: ResetRequest | None = None) -> dict[str, Any]:
+    if body is None:
+        body = ResetRequest()
     observation = env.reset(body.task_id, body.seed)
     return {"observation": observation.model_dump()}
 
