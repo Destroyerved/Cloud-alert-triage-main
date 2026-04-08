@@ -91,18 +91,18 @@ def grade_episode(
 
     # Quality check: if any critical component is too low, cap the score
     # This prevents "mostly correct" agents from getting near-perfect scores
-    min_acceptable = 0.50  # Below 50% on any component = poor quality
+    min_acceptable = 0.70  # Below 70% on any component = significant penalty
     if _root_cause_accuracy(decisions_by_id, ground_truth) < min_acceptable:
-        score *= 0.5
+        score *= 0.3
     if _severity_accuracy(decisions_by_id, ground_truth) < min_acceptable:
-        score *= 0.5
+        score *= 0.3
     if _remediation_accuracy(decisions_by_id, ground_truth) < min_acceptable:
-        score *= 0.5
+        score *= 0.3
 
-    # Penalize skips - they should not give high rewards
+    # Penalize ALL skips - they should not give high rewards
     skip_ratio = len(skips_by_id) / len(ground_truth) if ground_truth else 0.0
-    if skip_ratio > 0.3:  # More than 30% skipped alerts = significant penalty
-        score *= (1.0 - skip_ratio)
+    # Any skip reduces score proportionally (even 1 skip is penalized)
+    score *= max(0.0, 1.0 - skip_ratio * 2)  # 2x penalty for skips
 
     # Stealth bonus (hard only)
     score += _STEALTH_BONUS[task_id] * _stealth_bonus(
