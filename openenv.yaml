@@ -248,7 +248,7 @@ tasks:
       remediation_accuracy: 0.15
       incident_link_f1: 0.25
       false_alarm_accuracy: 0.10
-      stealth_bonus: 0.10
+      stealth_bonus: 0.05
     expected_score_range: [0.40, 0.70]
     expected_score_gpt4: 0.58
 

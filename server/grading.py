@@ -19,7 +19,7 @@ _WEIGHTS: dict[str, dict[str, float]] = {
 _STEALTH_BONUS: dict[str, float] = {
     "easy": 0.00,
     "medium": 0.00,
-    "hard": 0.10,
+    "hard": 0.05,
 }
 
 

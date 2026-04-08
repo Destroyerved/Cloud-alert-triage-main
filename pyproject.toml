@@ -3,7 +3,9 @@ name = "cloud-alert-triage"
 version = "0.1.0"
 description = "OpenEnv environment for cloud alert triage"
 authors = [
-  { name = "Ubaid" }
+  { name = "Ubaid Khan", email = "" },
+  { name = "Bhavesh Kumar", email = "" },
+  { name = "Ved Sharma", email = "" }
 ]
 dependencies = [
   "openenv-core>=0.2.0"
