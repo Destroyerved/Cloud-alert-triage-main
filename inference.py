@@ -81,7 +81,7 @@ MODEL_NAME: str = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 _explicit_base  = os.environ.get("API_BASE_URL", "")
 _groq_key       = os.environ.get("GROQ_API_KEY", "")
 _openai_key     = os.environ.get("OPENAI_API_KEY", "")
-_hf_token       = os.environ.get("HF_TOKEN", "")
+_hf_token       = os.environ.get("HF_TOKEN")
 
 if _explicit_base:
     API_BASE_URL: str = _explicit_base
@@ -103,7 +103,10 @@ else:
     # HF Inference or any other OpenAI-compatible host
     API_KEY = _hf_token or _openai_key or _groq_key
 
-del _explicit_base, _groq_key, _openai_key, _hf_token
+if not API_KEY:
+    raise ValueError("HF_TOKEN environment variable is required when no other API key is set")
+
+_hf_token = _hf_token or ""
 
 TASKS: list[str]             = ["easy", "medium", "hard"]
 DEFAULT_SEED: int             = 42
