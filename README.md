@@ -12,6 +12,12 @@ An AI-powered SRE agent that detects cascading failures, links related alerts, a
 
 ---
 
+## 🎯 Why This Domain
+
+We chose SRE alert triage because it represents one of the hardest real-world decision-making problems for AI systems: high-noise environments, cascading dependencies, and time-critical actions. Unlike static benchmarks, this domain requires agents to reason over system state, not just classify inputs.
+
+---
+
 An SRE alert triage environment where an AI agent must classify, correlate, and remediate cloud infrastructure alerts across a realistic 17-service microservice graph — under time pressure, with injected noise, stealth failures, and a live cascade mechanic that punishes delay.
 
 ---
