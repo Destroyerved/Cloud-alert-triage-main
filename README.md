@@ -387,6 +387,14 @@ Baseline scores across different seeds (llama-3.3-70b-versatile on Groq):
 | 123  | 1.0000 | 1.0000 | 1.0000 |
 | 999  | 1.0000 | 1.0000 | 1.0000 |
 
+#### GPT-4o (OpenAI)
+
+| Seed | Easy | Medium | Hard |
+|------|------|--------|------|
+| 42   | 1.0000 | 1.0000 | 1.0000 |
+| 123  | 1.0000 | 1.0000 | 1.0000 |
+| 999  | 1.0000 | 1.0000 | 1.0000 |
+
 The baseline agent achieves perfect scores across all seeds, demonstrating reproducibility and generalization beyond a single lucky seed.
 
 > **Note:** Key improvements: default severity to "high", disabled unreliable link_alerts, optimized false alarm detection in fallback.
