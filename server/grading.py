@@ -134,10 +134,10 @@ def grade_episode(
         decisions_by_id, ground_truth, incidents
     )
 
-    # Clamp to open interval (0, 1) — a perfect 1.0 is not achievable by
-    # design, matching the documented contract that scores are strictly
-    # between 0 and 1 for any non-trivial agent.
-    return round(max(0.0, min(0.9999, score)), 4)
+    # Clamp to open interval (0, 1) — strictly between 0 and 1.
+    # - Minimum: 0.0001 (cannot be 0 or lower)
+    # - Maximum: 0.9999 (cannot be 1 or higher)
+    return round(max(0.0001, min(0.9999, score)), 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
