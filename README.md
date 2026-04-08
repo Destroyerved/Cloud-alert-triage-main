@@ -467,7 +467,7 @@ cloud-alert-triage/
           <img src="https://avatars.githubusercontent.com/Destroyerved?s=120" width="120px;" height="120px;" alt="Rohan"/>
         </div>
         <div><strong>Architecture Design</strong></div>
-        <div><strong> Ved </strong></div>
+        <div><strong> Ved SHURMA </strong></div>
         <a href="https://github.com/Destroyerved">🌐 GitHub</a>
       </td>
     </tr>
