@@ -31,6 +31,7 @@ class Alert(BaseModel):
     metric: str                             # e.g. "cpu_usage_percent"
     metric_value: float | None = None       # observed value (None if masked)
     threshold: float                        # threshold that was breached
+    metric_history: list[float] | None = None  # 5-point rolling window [t-4..t-0 min]
     message: str                            # human-readable alert text
     context: str | None = None              # optional extra context (recent deploy, etc.)
     triaged: bool = False                   # True once the agent has acted on this alert

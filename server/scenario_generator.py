@@ -115,6 +115,55 @@ def _ts(offset_minutes: int) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _gen_history(
+    rng: random.Random,
+    current_val: float,
+    threshold: float,
+    pattern: str = "rising",
+) -> list[float]:
+    """
+    Generate 4 preceding metric readings (t-4 … t-1 min) that precede
+    *current_val*, producing a realistic 5-point time-series window.
+
+    Patterns
+    --------
+    rising   : steady ramp toward breach (resource exhaustion / config drift)
+    spike    : flat baseline then sudden jump at t-1 (deploy bug / network event)
+    gradual  : slow linear climb over the whole window (memory leak / config drift)
+    random   : values hover just below threshold (false-alarm / borderline noise)
+    """
+    if pattern == "rising":
+        # Linear ramp: from 60 % of threshold up to current_val.
+        start = threshold * 0.60
+        points = [
+            round(start + (current_val - start) * i / 4 + rng.uniform(-1.5, 1.5), 2)
+            for i in range(4)
+        ]
+    elif pattern == "spike":
+        # Flat baseline (just below threshold) then sharp jump at t-1.
+        baseline = threshold * rng.uniform(0.55, 0.75)
+        points = [
+            round(baseline + rng.uniform(-2.0, 2.0), 2) for _ in range(3)
+        ]
+        # t-1: already above threshold, approaching current
+        points.append(round(threshold + (current_val - threshold) * 0.6 + rng.uniform(-1.0, 1.0), 2))
+    elif pattern == "gradual":
+        # Very slow climb over the full window (stealth / memory leak pattern).
+        start = threshold * 0.88
+        points = [
+            round(start + (current_val - start) * i / 5 + rng.uniform(-0.5, 0.5), 2)
+            for i in range(4)
+        ]
+    else:  # random / false-alarm
+        # Noisy values that stay near-but-below threshold.
+        points = [
+            round(threshold * rng.uniform(0.82, 0.99) + rng.uniform(-1.0, 1.0), 2)
+            for _ in range(4)
+        ]
+    points.append(round(float(current_val), 2))  # t-0 = current breach value
+    return points
+
+
 def _alert_dict(
     alert_id: str,
     service: str,
@@ -124,17 +173,19 @@ def _alert_dict(
     message: str,
     timestamp: str,
     context: str | None = None,
+    metric_history: list[float] | None = None,
 ) -> dict[str, Any]:
     return {
-        "alert_id":     alert_id,
-        "timestamp":    timestamp,
-        "service":      service,
-        "metric":       metric,
-        "metric_value": round(float(metric_value), 2),
-        "threshold":    float(threshold),
-        "message":      message,
-        "context":      context,
-        "triaged":      False,
+        "alert_id":       alert_id,
+        "timestamp":      timestamp,
+        "service":        service,
+        "metric":         metric,
+        "metric_value":   round(float(metric_value), 2),
+        "threshold":      float(threshold),
+        "message":        message,
+        "context":        context,
+        "metric_history": metric_history,   # 5-point rolling window [t-4..t-0]
+        "triaged":        False,
         "agent_decision": None,
     }
 
@@ -172,8 +223,9 @@ def _build_resource(
         f"{service} {metric.replace('_', ' ')} at {val:.1f}% "
         f"(threshold: {thr:.0f}%) — resource saturation detected"
     )
+    history = _gen_history(rng, val, thr, pattern="rising")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, metric_history=history),
         _gt_dict(alert_id, "resource_exhaustion", sev, "scale_up"),
     )
 
@@ -188,8 +240,9 @@ def _build_network(
         f"{service} network degradation: {metric.replace('_', ' ')} = {val:.1f} "
         f"(threshold: {thr:.0f}) — possible network partition or NIC saturation"
     )
+    history = _gen_history(rng, val, thr, pattern="spike")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, metric_history=history),
         _gt_dict(alert_id, "network_failure", "high", "escalate_to_team"),
     )
 
@@ -207,8 +260,9 @@ def _build_deploy(
         f"after recent deployment (threshold: {thr:.0f})"
     )
     ctx = f"Deploy v{ver} rolled out {mins_ago} minutes ago"
+    history = _gen_history(rng, val, thr, pattern="spike")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "deployment_bug", "high", "rollback_deploy"),
     )
 
@@ -224,8 +278,9 @@ def _build_config(
         f"{service} {metric.replace('_', ' ')} at {val:.1f} — "
         f"service misconfiguration suspected (threshold: {thr:.0f})"
     )
+    history = _gen_history(rng, val, thr, pattern="gradual")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, metric_history=history),
         _gt_dict(alert_id, "config_error", sev, "fix_config"),
     )
 
@@ -254,8 +309,9 @@ def _build_dependency(
     )
     ctx_tmpl = _DEP_CTX_TEMPLATES[ctx_variant % len(_DEP_CTX_TEMPLATES)]
     ctx = ctx_tmpl.format(dep=dep_service)
+    history = _gen_history(rng, val, thr, pattern="spike")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "dependency_outage", sev, "acknowledge_and_monitor", incident_id),
     )
 
@@ -286,8 +342,9 @@ def _build_deploy_cpu(
         f"Pressure began ~{mins_ago}m after deploy v{ver}; "
         "no capacity changes planned; possible memory regression in new build"
     )
+    history = _gen_history(rng, val, thr, pattern="gradual")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "deployment_bug", "high", "rollback_deploy"),
     )
 
@@ -321,8 +378,9 @@ def _build_latency_dep(
         f"High latency correlates with {dep_service} slowdowns; "
         f"no packet loss or NIC errors detected on {service}"
     )
+    history = _gen_history(rng, val, thr, pattern="rising")
     return (
-        _alert_dict(alert_id, service, "network_latency_ms", val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, "network_latency_ms", val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "dependency_outage", "high", "acknowledge_and_monitor"),
     )
 
@@ -354,8 +412,10 @@ def _build_false_alarm(
             f"known spike during scheduled batch job (threshold: {thr:.0f})"
         )
         ctx = "Scheduled maintenance window 10:00–11:00 UTC"
+    # False alarm history: noisy values near-but-below threshold (would drop after)
+    history = _gen_history(rng, val, thr, pattern="random")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "false_alarm", "low", "dismiss"),
     )
 
@@ -378,8 +438,10 @@ def _build_stealth_root(
         f"(threshold: {thr:.0f}%) — minor degradation, monitoring"
     )
     ctx = "No recent deploys. Pattern consistent with gradual memory leak."
+    # Stealth pattern: very slow, almost imperceptible climb (gradual memory leak)
+    history = _gen_history(rng, val, thr, pattern="gradual")
     return (
-        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx),
+        _alert_dict(alert_id, service, metric, val, thr, msg, ts, ctx, metric_history=history),
         _gt_dict(alert_id, "resource_exhaustion", "medium", "acknowledge_and_monitor", incident_id),
     )
 

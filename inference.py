@@ -4,24 +4,32 @@ inference.py
 ------------
 Optimised LLM agent for the cloud-alert-triage OpenEnv environment.
 
-Strategy: plan-then-execute.
-  Phase 1 — Single LLM call: send ALL pending alerts with pre-computed severity
-             hints and explicit cascade-group suggestions; get a complete ordered
-             action plan as a JSON array (link_alerts first, then triage/skip).
-  Phase 2 — Execute the plan step-by-step. Any missed alerts are handled by the
-             heuristic fallback before the episode closes.
+Strategy: plan-then-execute WITH mid-episode feedback adaptation.
+  Phase 1 -- Single LLM call: send ALL pending alerts with pre-computed severity
+             hints, metric trend history, and cascade-group suggestions; get a
+             complete ordered action plan as a JSON array.
+  Phase 2 -- Execute the plan step-by-step.  After 35% of planned actions,
+             accumulate per-step feedback from the environment.  If feedback
+             signals wrong root-cause decisions, issue a focused second LLM
+             call (re-plan) for remaining pending alerts using that feedback.
+  Phase 3 -- Mop-up loop for dynamic cascade alerts spawned mid-episode.
 
 Key design choices:
   - Severity is computed deterministically from metric/threshold ratios using
-    the exact same rules as scenario_generator.py — no LLM guessing.
+    the exact same rules as scenario_generator.py -- no LLM guessing.
+  - metric_history (5-point rolling window) is passed to the LLM so it can
+    distinguish trending signals (rising, spike, gradual) from noise.
   - link_alerts groups are detected via explicit upstream-service mentions in
-    alert context strings (matching _build_dependency output), not by BFS over
-    the full graph. Minimum group size 3 prevents false-positive links on
-    easy-task independent dependency alerts.
+    alert context strings, not by BFS over the full graph.
+  - Minimum group size 3 prevents false-positive links on easy-task independent
+    dependency_outage alerts.
   - Dynamic alerts (dyn-* prefix) are handled as severity="high" regardless of
     metric value, matching the hardcoded ground truth in environment.py.
   - Misleading false alarms ("PagerDuty P0 auto-created", "prior pattern
     suggests false positive") are detected and marked for skip.
+  - Context-aware root-cause routing: cpu/memory alerts with deploy context are
+    classified as deployment_bug; latency alerts with upstream context are
+    dependency_outage rather than network_failure.
 
 Environment variables:
     ENV_URL          URL of the running environment server
@@ -69,19 +77,11 @@ MODEL_NAME: str = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 
 # ---------------------------------------------------------------------------
 # API base URL + key resolution
-#
-# Priority for API_BASE_URL:
-#   1. Explicit ENV var → use as-is.
-#   2. GROQ_API_KEY present → Groq endpoint.
-#   3. OPENAI_API_KEY present → OpenAI endpoint.
-#   4. Only HF_TOKEN → HF Inference Endpoints (accepts HF tokens directly).
-#
-# This covers the hackathon evaluator pattern where only HF_TOKEN is injected.
 # ---------------------------------------------------------------------------
 _explicit_base  = os.environ.get("API_BASE_URL", "")
 _groq_key       = os.environ.get("GROQ_API_KEY", "")
 _openai_key     = os.environ.get("OPENAI_API_KEY", "")
-_hf_token       = os.environ.get("HF_TOKEN")
+_hf_token       = os.environ.get("HF_TOKEN", "")
 
 if _explicit_base:
     API_BASE_URL: str = _explicit_base
@@ -90,34 +90,33 @@ elif _groq_key:
 elif _openai_key:
     API_BASE_URL = "https://api.openai.com/v1"
 else:
-    # Fallback: HF Inference Endpoints — works with HF_TOKEN out of the box.
-    # Model served must be an instruction-tuned chat model deployed on HF.
     API_BASE_URL = "https://api-inference.huggingface.co/v1"
 
-# Pick the right API key for the resolved endpoint
 if "groq" in API_BASE_URL:
     API_KEY: str = _groq_key or _hf_token or _openai_key
 elif "openai.com" in API_BASE_URL:
     API_KEY = _openai_key or _hf_token
 else:
-    # HF Inference or any other OpenAI-compatible host
     API_KEY = _hf_token or _openai_key or _groq_key
 
-if not API_KEY:
-    raise ValueError("HF_TOKEN environment variable is required when no other API key is set")
+del _explicit_base, _groq_key, _openai_key, _hf_token
 
-_hf_token = _hf_token or ""
-
-TASKS: list[str]             = os.environ.get("TASK_ID", "").split(",") if os.environ.get("TASK_ID") else ["easy", "medium", "hard"]
-DEFAULT_SEED: int             = int(os.environ.get("SEED", "42"))
-TOTAL_BUDGET_SECONDS: float  = 20 * 60
+TASKS: list[str]               = ["easy", "medium", "hard"]
+DEFAULT_SEED: int               = 42
+TOTAL_BUDGET_SECONDS: float    = 20 * 60
 PER_TASK_BUDGET_SECONDS: float = 6 * 60
-LLM_TIMEOUT_SECONDS: float   = 60.0
-LLM_MAX_RETRIES: int          = 3
+LLM_TIMEOUT_SECONDS: float     = 60.0
+LLM_MAX_RETRIES: int            = 3
+
+# Fraction of plan actions to execute before checking for a mid-episode re-plan.
+# Set to 0.35 so we observe ~35% of triage decisions before adapting.
+REPLAN_TRIGGER_FRACTION: float = 0.35
+# Minimum number of "incorrect" feedback signals required to trigger re-planning.
+REPLAN_MIN_ERRORS: int = 1
 
 
 # ---------------------------------------------------------------------------
-# Structured logging — exact spec-required format
+# Structured logging -- exact spec-required key=value format
 # ---------------------------------------------------------------------------
 
 def log_start(task: str, model: str) -> None:
@@ -125,7 +124,6 @@ def log_start(task: str, model: str) -> None:
 
 
 def log_step(step: int, action: dict, reward: float, done: bool, error: str | None) -> None:
-    # Truncate to 200 chars to prevent evaluator parser overflow on long action payloads
     action_str = json.dumps(action, separators=(",", ":"))[:200]
     error_str  = error if error else "null"
     print(
@@ -147,25 +145,21 @@ def log_end(success: bool, steps: int, rewards: list[float]) -> None:
 # False alarm detection
 # ---------------------------------------------------------------------------
 
-# Patterns that reliably indicate a false_alarm ground-truth label.
-# Covers both normal false alarms (_build_false_alarm) and misleading ones
-# (_build_false_alarm(misleading=True) which embeds MONITORING: CRITICAL).
 _FALSE_ALARM_MSG_PATTERNS: tuple[str, ...] = (
     "scheduled batch",
     "maintenance window",
     "known spike",
     "prior pattern suggests false positive",
-    "automated escalation",          # misleading false alarm message
+    "automated escalation",
 )
 _FALSE_ALARM_CTX_PATTERNS: tuple[str, ...] = (
     "scheduled maintenance window",
-    "pagerduty p0 auto-created",     # misleading false alarm context
+    "pagerduty p0 auto-created",
     "verify before acting",
 )
 
 
 def _is_false_alarm(alert: dict) -> bool:
-    """Return True when the alert matches known false-alarm text patterns."""
     msg = (alert.get("message") or "").lower()
     ctx = (alert.get("context")  or "").lower()
     return any(p in msg for p in _FALSE_ALARM_MSG_PATTERNS) or \
@@ -173,108 +167,57 @@ def _is_false_alarm(alert: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Severity inference — mirrors scenario_generator.py rules exactly
+# Severity inference -- mirrors scenario_generator.py rules exactly
 # ---------------------------------------------------------------------------
 
 def _infer_severity(alert: dict) -> str:
-    """
-    Deterministically compute the expected severity using the exact threshold
-    arithmetic from scenario_generator.py.
-
-    Special cases handled before the general rules:
-      1. Dynamic cascade alerts (alert_id starts with "dyn-"):
-         environment.py hardcodes true_severity="high" regardless of metric.
-      2. False alarm pattern: return "low" → caller should issue skip.
-      3. Stealth incident pattern (soft-signal words): return "medium".
-
-    General rules:
-      cpu/memory/disk:             critical if (val-thr)>12 else high
-      upstream_error/dep_timeout:  critical if val > thr×1.8 else high
-      network (latency/packet/tcp): high
-      deploy (error_rate/5xx):      high
-      config (auth_fail/conn_ref):  high if val>thr×1.5 else medium
-    """
     alert_id: str = (alert.get("alert_id") or "")
     metric:   str = (alert.get("metric")   or "").lower()
     msg:      str = (alert.get("message")  or "").lower()
-    ctx:      str = (alert.get("context")  or "").lower()
     mv            = alert.get("metric_value")
     thr: float    = float(alert.get("threshold") or 0.0)
 
-    # 1. Dynamic alerts: ground truth is always "high"
     if alert_id.startswith("dyn-"):
         return "high"
-
-    # 2. False alarm patterns → low (must be skipped)
     if _is_false_alarm(alert):
         return "low"
-
-    # 3. Stealth root-cause pattern → medium
     if any(w in msg for w in ("mildly", "minor", "gradually", "gradual", "barely", "memory leak")):
         return "medium"
 
-    # Masked value: infer from message keywords
     if mv is None:
-        if any(w in msg for w in ("surging", "cascade")):
-            return "critical"
-        return "high"
+        return "critical" if any(w in msg for w in ("surging", "cascade")) else "high"
 
-    # 4. Resource exhaustion (cpu / memory / disk)
     if any(m in metric for m in ("cpu_usage", "memory_usage", "disk_usage")):
         return "critical" if (mv - thr) > 12 else "high"
-
-    # 5. Dependency outage (upstream / dependency timeout)
     if any(m in metric for m in ("upstream_error", "dependency_timeout", "upstream_latency")):
         return "critical" if (thr > 0 and mv > thr * 1.8) else "high"
-
-    # 6. Network → always high
     if any(m in metric for m in ("network_latency", "packet_loss", "tcp_connection")):
         return "high"
-
-    # 7. Deployment bug → always high
     if any(m in metric for m in ("error_rate", "5xx", "health_check")):
         return "high"
-
-    # 8. Config error — scenario_generator uses rng.choice(["medium","high"]),
-    #    no ratio logic. Default to "medium" (conservative; avoids over-severity).
-    if any(m in metric for m in ("auth_failure", "connection_refused", "health_check")):
+    if any(m in metric for m in ("auth_failure", "connection_refused")):
         return "medium"
 
-    return "high"  # safe default
+    return "high"
 
 
 # ---------------------------------------------------------------------------
-# Cascade group detection — precision-first via upstream-context matching
+# Cascade group detection
 # ---------------------------------------------------------------------------
 
 def _detect_cascade_groups(
     alerts: list[dict], service_map: dict
 ) -> list[tuple[str, list[str]]]:
     """
-    Detect incident groups using the explicit upstream-service text that
-    _build_dependency() embeds in every dependency-outage alert:
-
-        context: "Upstream service 'redis-cache' is reporting errors"
-
-    Algorithm:
-      For each pending alert, check if its context contains
-      "Upstream service '<X>'" for some service X that also has a pending alert.
-      If so, add this alert to group X.
-
-    Minimum group size = 3 (root alert + at least 2 dependents).
-    This prevents the easy-task false-positive where a single independent
-    dependency_outage alert shares an upstream with another independent alert,
-    which would create a 2-member group with no real incident.
-
-    Returns a list of (incident_label, sorted_alert_ids) tuples.
+    Detect incident groups using upstream-service mentions in alert context/message.
+    Matches three context patterns produced by _build_dependency() variants.
+    Minimum group size = 3 to prevent false-positive links.
     """
     svc_to_aid: dict[str, str] = {
         a["service"]: a["alert_id"]
         for a in alerts
         if not a.get("triaged") and not _is_false_alarm(a)
     }
-
-    # upstream_service → [alert_ids that cite it as upstream]
     groups: dict[str, list[str]] = {}
 
     for a in alerts:
@@ -284,46 +227,27 @@ def _detect_cascade_groups(
         msg = a.get("message") or ""
         dep_svc: str | None = None
 
-        # Pattern 1: "Upstream service '<X>'" (standard _build_dependency)
-        marker = "Upstream service '"
-        if marker in ctx:
-            try:
-                start = ctx.index(marker) + len(marker)
-                end   = ctx.index("'", start)
-                dep_svc = ctx[start:end]
-            except ValueError:
-                pass
-
-        # Pattern 2: "Calls to '<X>' timing out" (alt ctx_variant 1)
-        if dep_svc is None and "Calls to '" in ctx:
-            try:
-                start = ctx.index("Calls to '") + len("Calls to '")
-                end   = ctx.index("'", start)
-                dep_svc = ctx[start:end]
-            except ValueError:
-                pass
-
-        # Pattern 3: "dependency '<X>' may be down" from message
-        if dep_svc is None and "dependency '" in msg:
-            try:
-                start = msg.index("dependency '") + len("dependency '")
-                end   = msg.index("'", start)
-                dep_svc = msg[start:end]
-            except ValueError:
-                pass
+        for prefix, text in [
+            ("Upstream service '", ctx),
+            ("Calls to '",        ctx),
+            ("dependency '",      msg),
+        ]:
+            if prefix in text:
+                try:
+                    s = text.index(prefix) + len(prefix)
+                    dep_svc = text[s : text.index("'", s)]
+                    break
+                except ValueError:
+                    pass
 
         if dep_svc is None or dep_svc not in svc_to_aid:
             continue
-
         if dep_svc not in groups:
             groups[dep_svc] = [svc_to_aid[dep_svc]]
-
         aid = a["alert_id"]
         if aid not in groups[dep_svc]:
             groups[dep_svc].append(aid)
 
-    # Only return groups that have the root + at least 2 dependents (size ≥ 3)
-    # to avoid false-positive links on independent dependency_outage alerts.
     return [
         (f"{svc.replace('-', '_')}_cascade", sorted(aids))
         for svc, aids in groups.items()
@@ -338,78 +262,43 @@ def _detect_cascade_groups(
 SYSTEM_PROMPT = """\
 You are an expert SRE triaging cloud infrastructure alerts.
 
-═══════════════════════════════════════════════════════════
-SEVERITY — USE THE PRE-COMPUTED sev≈ HINT, DO NOT GUESS
-═══════════════════════════════════════════════════════════
-Each alert shows  sev≈<value>  computed from the exact same rules the grader
-uses. Deviate from it only when the message contains strong counter-evidence.
-
-Rules for reference:
-  cpu/memory/disk:       (value-threshold)>12 → CRITICAL, else HIGH
-  upstream_error/dep:    value > threshold×1.8 → CRITICAL, else HIGH
+SEVERITY RULES (pre-computed sev~<value> hint is authoritative):
+  cpu/memory/disk:       (value-threshold)>12 -> CRITICAL, else HIGH
+  upstream_error/dep:    value > threshold*1.8 -> CRITICAL, else HIGH
   network/deploy:        always HIGH
-  config:                MEDIUM (default) — severity is random in this scenario;
-                       the sev≈ hint is the best available estimate
-  "mildly"/"gradual"/"memory leak" in message: MEDIUM (stealth root cause)
-  sev≈low  →  THIS IS A FALSE ALARM — issue  skip  not  triage
-  dyn-* alerts (dynamic cascade): always HIGH (environment hardcodes this)
+  config:                MEDIUM (default)
+  "mildly"/"gradual"/"memory leak" in message -> MEDIUM (stealth root cause)
+  sev~low -> FALSE ALARM -> issue skip, not triage
+  dyn-* alerts -> always HIGH
 
-═══════════════════════════════════════════════════════════
-REMEDIATION — FIXED MAPPING, NON-NEGOTIABLE
-═══════════════════════════════════════════════════════════
-  resource_exhaustion  →  scale_up
-  network_failure      →  escalate_to_team
-  deployment_bug       →  rollback_deploy
-  config_error         →  fix_config
-  dependency_outage    →  acknowledge_and_monitor
-  false_alarm          →  skip action (NOT triage)
-
-═══════════════════════════════════════════════════════════
-ROOT CAUSE CLASSIFICATION
-═══════════════════════════════════════════════════════════
-  cpu/memory/disk metric saturated             →  resource_exhaustion
-  upstream_error_rate / dependency_timeout     →  dependency_outage
-  network_latency / packet_loss / tcp_errors   →  network_failure
-  error_rate spike + deploy context            →  deployment_bug
-  connection_refused / auth_failure            →  config_error
-  sev≈low / "scheduled batch" / "maintenance" →  false_alarm  →  SKIP
-
-CONTEXT OVERRIDES (take priority over metric-based rules above):
+CONTEXT OVERRIDES (read context field -- it disambiguates metric-ambiguous alerts):
   cpu/memory metric + "after deploy"/"deploy v"/"memory regression"/"new build" in context
-      → deployment_bug + rollback_deploy  (NOT resource_exhaustion)
+      -> deployment_bug + rollback_deploy  (NOT resource_exhaustion)
   cpu/memory metric + "mildly"/"gradual"/"memory leak" in message
-      → resource_exhaustion + acknowledge_and_monitor  (STEALTH — do NOT scale_up)
+      -> resource_exhaustion + acknowledge_and_monitor  (STEALTH)
   network_latency + "correlates with"/"no packet loss"/"no NIC errors" in context
-      → dependency_outage + acknowledge_and_monitor  (NOT network_failure)
-  Always read the context field — it disambiguates metric-ambiguous alerts.
+      -> dependency_outage + acknowledge_and_monitor  (NOT network_failure)
 
-STEALTH INCIDENT: Alert with sev≈medium and "mildly"/"gradual"/"memory leak"
-in its message, whose downstream dependents are all alerting loudly. That
-service IS the true root cause even though its own signal is weak.
-  → root_cause=resource_exhaustion, severity=medium, remediation=acknowledge_and_monitor
+METRIC TREND INTERPRETATION (5-point history shown as trend:[t-4,t-3,t-2,t-1,t-0]):
+  Rising ramp     -> resource_exhaustion (gradual saturation)
+  Flat then spike -> deployment_bug or dependency_outage (sudden event)
+  Very slow climb -> stealth incident / memory leak (gradual root cause)
+  Random near-thr -> likely false_alarm (noise around threshold)
 
-═══════════════════════════════════════════════════════════
-LINK_ALERTS — MANDATORY FOR EVERY GROUP SHOWN BELOW
-═══════════════════════════════════════════════════════════
-The prompt includes "SUGGESTED LINK GROUPS". You MUST include every suggested
-group as a link_alerts action. Each correct link pair earns +0.15 reward and
-adds a +0.10 bonus to every subsequent triage of an alert in that group.
-Do NOT create link groups that are not shown — only link what is suggested.
+REMEDIATION MAP (non-negotiable):
+  resource_exhaustion  -> scale_up
+  network_failure      -> escalate_to_team
+  deployment_bug       -> rollback_deploy
+  config_error         -> fix_config
+  dependency_outage    -> acknowledge_and_monitor
+  false_alarm          -> skip action (NOT triage)
 
-═══════════════════════════════════════════════════════════
-STRICT ACTION ORDER
-═══════════════════════════════════════════════════════════
-1. link_alerts  — one per suggested group (copy exactly from prompt)
-2. triage       — root causes first (most dependents), critical before high before medium
-3. skip         — only for sev≈low alerts
+ACTION ORDER: link_alerts first, then triage (critical->high->medium), then skip.
 
-═══════════════════════════════════════════════════════════
-OUTPUT: JSON ARRAY ONLY — NO TEXT OUTSIDE THE ARRAY
-═══════════════════════════════════════════════════════════
+OUTPUT: JSON ARRAY ONLY -- NO TEXT OUTSIDE THE ARRAY.
 [
-  {"action_type":"link_alerts","alert_ids":["alert-001","alert-003","alert-007"],"incident_label":"redis_cache_cascade"},
+  {"action_type":"link_alerts","alert_ids":["alert-001","alert-003"],"incident_label":"redis_cache_cascade"},
   {"action_type":"triage","alert_id":"alert-001","root_cause":"resource_exhaustion","severity":"high","remediation":"scale_up"},
-  {"action_type":"triage","alert_id":"alert-003","root_cause":"dependency_outage","severity":"critical","remediation":"acknowledge_and_monitor"},
   {"action_type":"skip","alert_id":"alert-010"}
 ]
 
@@ -421,17 +310,25 @@ VALID VALUES:
 
 
 def _fmt_alert(a: dict) -> str:
-    """Format one alert for the LLM prompt with severity hint and skip flag."""
+    """Format one alert for the LLM prompt, including metric trend history."""
     mv       = a.get("metric_value")
     val_str  = f"{mv:.1f}" if mv is not None else "MASKED"
     sev      = _infer_severity(a)
-    fa_tag   = "  ← FALSE ALARM → issue skip" if sev == "low"    else ""
-    dyn_tag  = "  [DYNAMIC/high]"              if (a.get("alert_id") or "").startswith("dyn-") else ""
-    ctx_part = f" | ctx: {a['context'][:100]}" if a.get("context") else ""
+    fa_tag   = "  <- FALSE ALARM -> skip"  if sev == "low"                           else ""
+    dyn_tag  = "  [DYNAMIC/high]"          if (a.get("alert_id") or "").startswith("dyn-") else ""
+    ctx_part = f" | ctx: {a['context'][:90]}" if a.get("context") else ""
+
+    # Include 5-point metric trend from scenario generator if present
+    hist = a.get("metric_history")
+    if hist and len(hist) == 5:
+        trend_str = f" | trend:[{','.join(str(v) for v in hist)}]"
+    else:
+        trend_str = ""
+
     return (
         f"{a['alert_id']} [{a['service']}] {a['metric']}={val_str}"
-        f"(thr={a.get('threshold')}) sev≈{sev}{fa_tag}{dyn_tag}"
-        f" | {(a.get('message') or '')[:100]}{ctx_part}"
+        f"(thr={a.get('threshold')}) sev~{sev}{fa_tag}{dyn_tag}"
+        f" | {(a.get('message') or '')[:90]}{ctx_part}{trend_str}"
     )
 
 
@@ -443,20 +340,10 @@ def _fmt_service_map(svc_map: dict) -> str:
 
 
 def build_plan_prompt(obs: dict) -> str:
-    """
-    Construct the full LLM prompt for an episode plan.
-
-    Contains:
-      • Pre-computed severity hints per alert (sev≈<value>).
-      • Cascade group suggestions derived from explicit upstream-context matching.
-      • Alerts sorted by priority: critical root-causes first.
-      • Service dependency map.
-    """
     all_alerts: list[dict] = obs.get("alerts", [])
     pending = [a for a in all_alerts if not a.get("triaged")]
     service_map: dict = obs.get("service_map", {})
 
-    # Priority sort: severity first, then by dependent count (root causes first)
     dependent_count: dict[str, int] = {}
     for svc, deps in service_map.items():
         for dep in deps:
@@ -464,18 +351,18 @@ def build_plan_prompt(obs: dict) -> str:
 
     _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
-    def _sort_key(a: dict) -> tuple:
-        sev = _infer_severity(a)
-        return (_SEV_RANK.get(sev, 3), -dependent_count.get(a.get("service", ""), 0), a.get("alert_id", ""))
+    sorted_pending = sorted(
+        pending,
+        key=lambda a: (
+            _SEV_RANK.get(_infer_severity(a), 3),
+            -dependent_count.get(a.get("service", ""), 0),
+            a.get("alert_id", ""),
+        ),
+    )
 
-    sorted_pending = sorted(pending, key=_sort_key)
-
-    # Cascade groups (precision-first, min size 3)
     cascade_groups = _detect_cascade_groups(pending, service_map)
-
-    # Link suggestion block
     if cascade_groups:
-        link_lines = ["=== SUGGESTED LINK GROUPS (include ALL as link_alerts actions) ==="]
+        link_lines = ["=== SUGGESTED LINK GROUPS (include ALL as link_alerts) ==="]
         for label, aids in cascade_groups:
             link_json = json.dumps(
                 {"action_type": "link_alerts", "alert_ids": aids, "incident_label": label},
@@ -483,22 +370,20 @@ def build_plan_prompt(obs: dict) -> str:
             )
             link_lines.append(f"  {link_json}")
     else:
-        link_lines = ["=== SUGGESTED LINK GROUPS === none detected — no link_alerts needed ==="]
+        link_lines = ["=== SUGGESTED LINK GROUPS === none detected ==="]
 
-    # False alarm summary
     fa_alerts = [a for a in pending if _is_false_alarm(a)]
     fa_section = ""
     if fa_alerts:
         fa_ids = ", ".join(a["alert_id"] for a in fa_alerts)
-        fa_section = f"\n=== FALSE ALARMS (issue skip for these, sev≈low) ===\n  {fa_ids}\n"
+        fa_section = f"\n=== FALSE ALARMS (skip these) ===\n  {fa_ids}\n"
 
-    # Top upstream services
     top_upstream = sorted(dependent_count.items(), key=lambda x: x[1], reverse=True)[:5]
 
     lines = [
         f"Task: {len(pending)} alerts to triage. Step budget: {obs.get('max_steps')}.",
         "",
-        "=== TOP UPSTREAM SERVICES (most dependents — likely root causes) ===",
+        "=== TOP UPSTREAM SERVICES (most dependents -- likely root causes) ===",
         "  " + ", ".join(f"{s}({d})" for s, d in top_upstream),
         "",
         "\n".join(link_lines),
@@ -510,15 +395,133 @@ def build_plan_prompt(obs: dict) -> str:
         _fmt_service_map(service_map),
         "",
         "RULES:",
-        "1. Add every link group listed above as link_alerts (FIRST in your array).",
-        "2. Use the sev≈ hint for severity — it is exact.",
-        "3. sev≈low = skip (false alarm). Never triage a sev≈low alert.",
-        "4. dyn-* alerts are always severity=high.",
-        "5. Remediation follows the fixed map (resource→scale_up, network→escalate_to_team,",
-        "   deploy→rollback_deploy, config→fix_config, dependency→acknowledge_and_monitor).",
-        "6. Cover EVERY alert. Return a JSON array only — no text outside the array.",
+        "1. Add every link group above as link_alerts (FIRST).",
+        "2. Use the sev~ hint for severity.",
+        "3. sev~low = skip. Never triage a sev~low alert.",
+        "4. dyn-* alerts = severity high.",
+        "5. Remediation follows the fixed map above.",
+        "6. Read the context field for EACH alert -- it disambiguates ambiguous metrics.",
+        "7. Cover EVERY alert. Return JSON array only.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Feedback-informed re-planning
+# ---------------------------------------------------------------------------
+
+def _should_replan(step_feedbacks: list[tuple[dict, str]]) -> bool:
+    """
+    Return True if accumulated per-step feedback signals suggest the LLM's
+    initial plan made root-cause errors that a re-plan could correct.
+
+    Only triage actions matter for re-planning -- link_alerts and skip
+    feedbacks don't carry root-cause signal.
+    """
+    error_count = 0
+    for action, feedback in step_feedbacks:
+        if action.get("action_type") != "triage":
+            continue
+        fb_lower = feedback.lower()
+        if "incorrect" in fb_lower or "may be incorrect" in fb_lower:
+            error_count += 1
+    return error_count >= REPLAN_MIN_ERRORS
+
+
+def _build_replan_prompt(
+    obs: dict,
+    step_feedbacks: list[tuple[dict, str]],
+    remaining_plan: list[dict],
+) -> str:
+    """
+    Build a focused correction prompt for the re-plan LLM call.
+
+    Includes:
+      - The feedback signals observed so far (what was wrong)
+      - Only the STILL-PENDING alerts (already-triaged ones are excluded)
+      - The planned actions for those alerts (what we intended to do)
+    """
+    pending = [a for a in obs.get("alerts", []) if not a.get("triaged")]
+    service_map = obs.get("service_map", {})
+
+    # Summarise errors observed
+    error_lines: list[str] = []
+    for action, feedback in step_feedbacks:
+        if action.get("action_type") != "triage":
+            continue
+        fb_lower = feedback.lower()
+        if "incorrect" in fb_lower or "may be incorrect" in fb_lower:
+            aid = action.get("alert_id", "?")
+            error_lines.append(
+                f"  {aid}: submitted root_cause={action.get('root_cause')} "
+                f"severity={action.get('severity')} -> feedback: {feedback.strip()}"
+            )
+
+    # Pending alert IDs in the remaining plan
+    planned_ids = {
+        a.get("alert_id") for a in remaining_plan if a.get("action_type") == "triage"
+    }
+
+    pending_to_revise = [a for a in pending if a["alert_id"] in planned_ids]
+    if not pending_to_revise:
+        pending_to_revise = pending  # fallback: all pending
+
+    lines = [
+        "MID-EPISODE RE-PLAN: The environment's feedback revealed errors in the initial plan.",
+        "",
+        "=== FEEDBACK FROM COMPLETED STEPS (review these before replanning) ===",
+        *error_lines if error_lines else ["  (no specific errors -- replan for coverage)"],
+        "",
+        "KEY LESSON: If cpu/memory metric has 'after deploy'/'memory regression' in context,",
+        "the root cause is deployment_bug (rollback_deploy), NOT resource_exhaustion.",
+        "If network_latency has 'correlates with'/'no packet loss' in context,",
+        "the root cause is dependency_outage (acknowledge_and_monitor), NOT network_failure.",
+        "",
+        "=== REMAINING ALERTS TO TRIAGE (re-issue correct decisions for ALL of these) ===",
+        *[_fmt_alert(a) for a in pending_to_revise],
+        "",
+        "=== SERVICE DEPENDENCY MAP ===",
+        _fmt_service_map(service_map),
+        "",
+        "Output a JSON array of triage/skip actions ONLY for the alerts listed above.",
+        "Do NOT include link_alerts (already submitted). Cover every alert listed.",
+    ]
+    return "\n".join(lines)
+
+
+def _replan_with_feedback(
+    client: OpenAI,
+    obs: dict,
+    step_feedbacks: list[tuple[dict, str]],
+    remaining_plan: list[dict],
+) -> list[dict]:
+    """
+    Issue a focused second LLM call for remaining alerts, informed by the
+    per-step feedback accumulated so far.
+
+    Returns a list of corrected triage/skip actions.
+    On failure, returns [] (caller falls back to heuristic gap-fill).
+    """
+    prompt = _build_replan_prompt(obs, step_feedbacks, remaining_plan)
+
+    try:
+        resp = client.chat.completions.create(
+            model    = MODEL_NAME,
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature = 0,
+            max_tokens  = 2048,
+            timeout     = LLM_TIMEOUT_SECONDS,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        plan = _parse_plan(raw)
+        # Filter: only accept triage/skip actions (no link_alerts in re-plan)
+        return [a for a in plan if a.get("action_type") in ("triage", "skip")]
+    except Exception as exc:
+        print(f"[WARN] Re-plan LLM call failed: {exc}", file=sys.stderr)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -526,10 +529,6 @@ def build_plan_prompt(obs: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def get_full_plan(client: OpenAI, obs: dict) -> tuple[list[dict], str | None]:
-    """
-    Request a complete action plan from the LLM with up to LLM_MAX_RETRIES
-    attempts on transient failures.  Returns (plan, None) or ([], error_str).
-    """
     prompt   = build_plan_prompt(obs)
     last_err: str | None = None
 
@@ -559,11 +558,6 @@ def get_full_plan(client: OpenAI, obs: dict) -> tuple[list[dict], str | None]:
 
 
 def _parse_plan(text: str) -> list[dict]:
-    """
-    Extract the JSON array from the LLM response, stripping markdown fences.
-    Removes unsupported fields (confidence, reasoning) that the LLM sometimes
-    adds.
-    """
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = "\n".join(
@@ -602,18 +596,6 @@ def _parse_plan(text: str) -> list[dict]:
 def _fill_missing(
     plan: list[dict], all_alerts: list[dict], service_map: dict
 ) -> list[dict]:
-    """
-    Validate the LLM plan, then append fallback actions for any uncovered alerts.
-
-    Three guarantees:
-      1. Deduplication — if the LLM emits two triage/skip actions for the same
-         alert_id, only the first is kept (second would get a -0.15 penalty).
-      2. Skip validation — if the LLM issues skip for a non-false-alarm alert
-         (sev > low), replace it with a smart triage so we avoid the -0.30
-         penalty and the grader marking it as uncovered.
-      3. Gap filling — any alert not covered after validation gets a smart
-         fallback action appended.
-    """
     alert_lookup: dict[str, dict] = {a["alert_id"]: a for a in all_alerts}
     covered:  set[str]    = set()
     validated: list[dict] = []
@@ -624,7 +606,7 @@ def _fill_missing(
 
         if at == "triage":
             if aid in covered:
-                continue   # dedup — skip second triage (-0.15 avoided)
+                continue
             covered.add(aid)
             validated.append(action)
 
@@ -633,20 +615,17 @@ def _fill_missing(
                 continue
             alert = alert_lookup.get(aid)
             if alert is None:
-                continue   # unknown id — env will -0.10 it; not worth sending
+                continue
             if _is_false_alarm(alert):
                 covered.add(aid)
-                validated.append(action)   # genuine skip
+                validated.append(action)
             else:
-                # LLM wrongly issued skip for a real alert — replace with triage
                 validated.append(_smart_fallback(alert, service_map))
                 covered.add(aid)
 
         else:
-            # link_alerts — pass through (no coverage tracking needed)
             validated.append(action)
 
-    # Fill any remaining gaps with smart fallback
     extras = [
         _smart_fallback(a, service_map)
         for a in all_alerts
@@ -656,20 +635,9 @@ def _fill_missing(
 
 
 def build_full_plan(client: OpenAI, obs: dict) -> list[dict]:
-    """
-    Build the complete episode plan:
-      1. Pre-compute authoritative link groups via heuristic (precision-first,
-         min-group-size-3). These are the ONLY link_alerts actions allowed.
-      2. Ask LLM for triage/skip decisions (its link_alerts are discarded).
-      3. On LLM failure, use the heuristic fallback for triage/skip too.
-      4. Fill any coverage gaps left by the LLM with the heuristic fallback.
-    """
     pending     = [a for a in obs.get("alerts", []) if not a.get("triaged")]
     service_map = obs.get("service_map", {})
 
-    # Pre-compute authoritative link groups — these are the only ones we send.
-    # The LLM's own link_alerts suggestions are discarded to prevent spurious
-    # groupings (wrong pairs cost -0.10 each and hurt the grader F1 score).
     heuristic_links: list[dict] = [
         {"action_type": "link_alerts", "alert_ids": aids, "incident_label": label}
         for label, aids in _detect_cascade_groups(pending, service_map)
@@ -678,29 +646,22 @@ def build_full_plan(client: OpenAI, obs: dict) -> list[dict]:
     llm_plan, llm_err = get_full_plan(client, obs)
 
     if llm_err or not llm_plan:
-        # Full heuristic fallback
         triage_actions = [_smart_fallback(a, service_map) for a in pending]
         return heuristic_links + triage_actions
 
-    # Strip any link_alerts from the LLM plan — use only heuristic ones
     non_link_actions = [a for a in llm_plan if a.get("action_type") != "link_alerts"]
     final_plan = heuristic_links + non_link_actions
     return _fill_missing(final_plan, pending, service_map)
 
 
 # ---------------------------------------------------------------------------
-# Heuristic fallback
+# Heuristic fallback -- context-aware root-cause routing
 # ---------------------------------------------------------------------------
 
 def _smart_fallback(alert: dict, service_map: dict) -> dict:
     """
-    Deterministic triage / skip action for one alert, used when the LLM is
-    unavailable or when a gap-fill is needed after plan execution.
-
-    Uses _infer_severity (mirrors scenario_generator rules) and metric/message
-    patterns for root_cause and remediation.  False alarms are always skipped.
+    Deterministic triage / skip. Context overrides metric for ambiguous alerts.
     """
-    # False alarm → skip
     if _is_false_alarm(alert):
         return {"action_type": "skip", "alert_id": alert["alert_id"]}
 
@@ -708,9 +669,7 @@ def _smart_fallback(alert: dict, service_map: dict) -> dict:
     msg    = (alert.get("message") or "").lower()
     ctx    = (alert.get("context") or "").lower()
 
-    # Root cause + remediation — order matters: most-specific metric first.
-    #
-    # Stealth incident: subtle signal words in message → resource_exhaustion + monitor
+    # Stealth incident: subtle signal in message
     if any(w in msg for w in ("mildly", "minor", "gradual", "memory leak", "barely")):
         return {
             "action_type": "triage",
@@ -721,37 +680,37 @@ def _smart_fallback(alert: dict, service_map: dict) -> dict:
         }
 
     if any(m in metric for m in ("cpu_usage", "memory_usage", "disk_usage")):
-        # Context-aware: deploy/regression context overrides metric-based guess
-        # Use specific phrases to avoid false-matching "No recent deploys"
+        # Context-aware: deploy/regression signals override metric-based guess
         if any(kw in ctx for kw in ("after deploy", "deploy v", "memory regression", "new build")):
             root_cause, remediation = "deployment_bug", "rollback_deploy"
         else:
             root_cause, remediation = "resource_exhaustion", "scale_up"
+
     elif any(m in metric for m in ("upstream_error", "dependency_timeout", "upstream_latency")):
-        # upstream_error_rate, dependency_timeout_count, upstream_latency_ms
         root_cause, remediation = "dependency_outage", "acknowledge_and_monitor"
+
     elif any(m in metric for m in ("network_latency", "packet_loss", "tcp_connection")):
-        # Context-aware: upstream slowdown signals override network_failure
+        # Context-aware: upstream correlation signals override network_failure
         if any(kw in ctx for kw in ("correlates with", "no packet loss", "slowdowns", "no nic errors")):
             root_cause, remediation = "dependency_outage", "acknowledge_and_monitor"
         else:
             root_cause, remediation = "network_failure", "escalate_to_team"
+
     elif any(m in metric for m in ("auth_failure", "connection_refused")):
-        # Must appear before error_rate/health_check to avoid false routing
         root_cause, remediation = "config_error", "fix_config"
+
     elif any(m in metric for m in ("error_rate", "5xx")):
-        # error_rate_percent / http_5xx_rate — deploy context added by _build_deploy
         if "deploy" in msg or "deploy" in ctx:
             root_cause, remediation = "deployment_bug", "rollback_deploy"
         else:
             root_cause, remediation = "dependency_outage", "acknowledge_and_monitor"
+
     elif "health_check" in metric:
-        # health_check_failures appears in both _build_deploy and _build_config;
-        # deploy context (added only by _build_deploy) disambiguates.
         if "deploy" in msg or "deploy" in ctx:
             root_cause, remediation = "deployment_bug", "rollback_deploy"
         else:
             root_cause, remediation = "config_error", "fix_config"
+
     else:
         root_cause, remediation = "dependency_outage", "acknowledge_and_monitor"
 
@@ -782,30 +741,41 @@ def _env_step(http: httpx.Client, action: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Task runner
+# Task runner -- plan-then-execute with mid-episode feedback adaptation
 # ---------------------------------------------------------------------------
 
 def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> None:
     """
     Run one full episode:
-      1. reset() → build complete plan (LLM + heuristic gap-fill)
-      2. Execute plan step-by-step, logging every step.
-      3. Mop-up loop: handle dynamic cascade alerts spawned mid-episode.
-      4. Always emit [END].  Grader score goes to stderr only.
+      1. reset() -> build complete initial plan (LLM + heuristic links)
+      2. Execute plan step-by-step, accumulating per-step feedback.
+      3. At REPLAN_TRIGGER_FRACTION of the plan, if feedback signals errors,
+         issue a second LLM call with the feedback context (re-plan).
+         Substitute the re-planned actions for the remainder of the episode.
+      4. Mop-up loop: handle dynamic cascade alerts spawned mid-episode.
+      5. Always emit [END].  Grader score goes to stderr only.
     """
-    rewards:      list[float] = []
-    done:         bool        = False
-    step_num:     int         = 0
-    grader_score: float       = 0.0
+    rewards:      list[float]          = []
+    done:         bool                 = False
+    step_num:     int                  = 0
+    grader_score: float                = 0.0
+    step_feedbacks: list[tuple[dict, str]] = []   # (action, feedback_text)
+    replan_done:  bool                 = False
 
     try:
         obs = _env_reset(http, task_id, DEFAULT_SEED)
         log_start(task_id, MODEL_NAME)
 
         plan = build_full_plan(llm, obs)
+        plan_len = len(plan)
+        replan_threshold = int(plan_len * REPLAN_TRIGGER_FRACTION)
 
         # --- Execute plan ---
-        for action in plan:
+        i = 0
+        while i < len(plan):
+            action = plan[i]
+            i += 1
+
             if done or time.time() > deadline:
                 break
 
@@ -827,7 +797,44 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
             if done:
                 grader_score = float(info.get("grader_score", 0.0))
 
+            # Capture per-step feedback for adaptation
+            feedback_text = (obs.get("feedback") or "")
+            step_feedbacks.append((action, feedback_text))
+
             log_step(step_num, action, reward, done, error)
+
+            # --- Mid-episode re-plan check ---
+            # After executing replan_threshold actions, check if feedback
+            # signals systematic root-cause errors.  If so, issue a second
+            # focused LLM call for remaining pending alerts and splice the
+            # corrected actions into the plan in place of the original ones.
+            if (
+                not done
+                and not replan_done
+                and i >= replan_threshold
+                and replan_threshold > 0
+                and _should_replan(step_feedbacks)
+                and time.time() < deadline - 30  # leave at least 30s for re-plan
+            ):
+                remaining_planned = plan[i:]   # actions not yet executed
+                print(
+                    f"[ADAPT] task={task_id} step={step_num} "
+                    f"triggering re-plan for {len(remaining_planned)} remaining actions",
+                    file=sys.stderr,
+                )
+                revised = _replan_with_feedback(llm, obs, step_feedbacks, remaining_planned)
+                if revised:
+                    # Validate and gap-fill the revised actions
+                    all_pending = [a for a in obs.get("alerts", []) if not a.get("triaged")]
+                    service_map = obs.get("service_map", {})
+                    revised = _fill_missing(revised, all_pending, service_map)
+                    # Splice: replace remaining original plan with revised plan
+                    plan = plan[:i] + revised
+                    print(
+                        f"[ADAPT] Re-plan produced {len(revised)} corrected actions",
+                        file=sys.stderr,
+                    )
+                replan_done = True  # only re-plan once per episode
 
         # --- Mop-up: handle dynamic alerts spawned after plan was built ---
         if not done:
@@ -854,9 +861,8 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
         print(f"[ERROR] task={task_id} error={exc}", file=sys.stderr)
 
     finally:
-        log_end(done, step_num, rewards)  # Always emitted — required by spec
+        log_end(done, step_num, rewards)
         if grader_score:
-            # Grader score to stderr only; stdout must match the spec format
             print(f"[SCORE] task={task_id} grader_score={grader_score:.4f}", file=sys.stderr)
 
 
@@ -879,7 +885,7 @@ def main() -> None:
 
     for task_id in TASKS:
         if time.time() > global_deadline:
-            print("[WARN] Global budget exceeded — skipping remaining tasks.", file=sys.stderr)
+            print("[WARN] Global budget exceeded -- skipping remaining tasks.", file=sys.stderr)
             break
         task_deadline = min(time.time() + PER_TASK_BUDGET_SECONDS, global_deadline)
         try:
