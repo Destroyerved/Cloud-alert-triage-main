@@ -386,6 +386,8 @@ pytest tests/ -v
 
 All scenario generation is deterministic: `generate_scenario(task_id, seed)` uses a `random.Random(seed)` instance exclusively. Global `random` is never touched. All list operations sort inputs before sampling, ensuring cross-platform consistency. Given the same `(task_id, seed)` pair, the alert set, ground truth, incident groupings, and grader output are byte-for-byte identical across Python versions and operating systems.
 
+This ensures that evaluation is fair, transparent, and directly comparable across different agent implementations.
+
 ---
 
 ## Tech Stack
