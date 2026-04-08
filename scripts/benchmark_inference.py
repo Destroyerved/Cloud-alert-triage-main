@@ -23,7 +23,6 @@ def start_server() -> subprocess.Popen:
     """Start server in background, wait ready."""
     proc = subprocess.Popen(
         SERVER_CMD,
-        cwd="cloud-alert-triage",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True
@@ -46,7 +45,8 @@ def run_inference(task: str, seed: int, api_key: str) -> Dict[str, float]:
     env["ENV_URL"] = "http://localhost:7860"
 
     proc = subprocess.run(
-        ["python", "inference.py"],
+        ["python", "cloud-alert-triage/inference.py"],
+        cwd=".",
         env=env,
         capture_output=True,
         text=True,
