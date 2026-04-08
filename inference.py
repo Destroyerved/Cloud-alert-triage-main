@@ -122,7 +122,8 @@ def log_start(task: str, model: str) -> None:
 
 
 def log_step(step: int, action: dict, reward: float, done: bool, error: str | None) -> None:
-    action_str = json.dumps(action, separators=(",", ":"))
+    # Truncate to 200 chars to prevent evaluator parser overflow on long action payloads
+    action_str = json.dumps(action, separators=(",", ":"))[:200]
     error_str  = error if error else "null"
     print(
         f"[STEP] step={step} action={action_str} reward={reward:.2f} "

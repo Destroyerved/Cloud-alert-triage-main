@@ -19,12 +19,196 @@ reward_range: [0, 1]
 max_steps: 45
 grader: deterministic
 
+# ─────────────────────────────────────────────────────────────
+# Observation Space
+# ─────────────────────────────────────────────────────────────
+observation_space:
+  type: dict
+  fields:
+    alerts:
+      type: list[Alert]
+      description: >
+        All alerts in the episode. Each alert includes alert_id, timestamp,
+        service, metric, metric_value (float or null if masked), threshold,
+        message, context (str or null), triaged (bool), and agent_decision
+        (dict or null once triaged).
+      alert_schema:
+        alert_id:     {type: string, example: "alert-001"}
+        timestamp:    {type: string, format: ISO-8601, example: "2024-01-15T10:23:00Z"}
+        service:      {type: string, example: "postgres-primary"}
+        metric:       {type: string, example: "cpu_usage_percent"}
+        metric_value: {type: number, nullable: true, description: "Observed value; null when masked"}
+        threshold:    {type: number, example: 80.0}
+        message:      {type: string, example: "CPU usage critical on postgres-primary"}
+        context:      {type: string, nullable: true, example: "Upstream service 'redis-cache' is reporting errors"}
+        triaged:      {type: boolean}
+        investigated: {type: boolean}
+        agent_decision: {type: object, nullable: true}
+        masked:       {type: boolean, description: "True when metric_value is hidden (partial observability)"}
+    service_map:
+      type: dict[str, list[str]]
+      description: >
+        Adjacency list of the 17-service dependency graph.
+        service → list of services it depends on.
+      example:
+        api-gateway: ["auth-service", "order-service", "search-service"]
+        postgres-primary: []
+    pending_count:
+      type: integer
+      description: Number of un-triaged alerts remaining in the episode.
+    step_number:
+      type: integer
+      description: Current step index (0-indexed).
+    max_steps:
+      type: integer
+      description: Total step budget for the current task.
+    feedback:
+      type: string
+      description: >
+        Short hint from the environment after the last action. Includes
+        root-cause correctness signal, cascade spawn notifications, and
+        penalty notifications. Empty string after reset().
+
+# ─────────────────────────────────────────────────────────────
+# Action Space
+# ─────────────────────────────────────────────────────────────
+action_space:
+  type: union
+  discriminator: action_type
+  actions:
+
+    triage:
+      description: >
+        Classify one alert with its root cause, severity, and recommended
+        remediation. Marks the alert as triaged. Earns up to +0.90 per step.
+      fields:
+        action_type:
+          type: string
+          const: "triage"
+        alert_id:
+          type: string
+          required: true
+          description: ID of the alert to triage (must exist and not be already triaged).
+        root_cause:
+          type: string
+          required: true
+          enum:
+            - resource_exhaustion
+            - network_failure
+            - deployment_bug
+            - config_error
+            - dependency_outage
+        severity:
+          type: string
+          required: true
+          enum: [critical, high, medium, low]
+        remediation:
+          type: string
+          required: true
+          enum:
+            - scale_up
+            - escalate_to_team
+            - rollback_deploy
+            - fix_config
+            - acknowledge_and_monitor
+            - restart_service
+            - dismiss
+      example:
+        action_type: "triage"
+        alert_id: "alert-003"
+        root_cause: "resource_exhaustion"
+        severity: "critical"
+        remediation: "scale_up"
+
+    link_alerts:
+      description: >
+        Group two or more correlated alerts into a named incident.
+        Does NOT mark alerts as triaged — they must be triaged separately.
+        Scored via pair-set F1 against true incident groupings.
+        Earns +0.15 per correct alert pair; -0.10 per incorrect pair.
+      fields:
+        action_type:
+          type: string
+          const: "link_alerts"
+        alert_ids:
+          type: list[string]
+          required: true
+          min_items: 2
+          description: At least 2 alert IDs to group together as one incident.
+        incident_label:
+          type: string
+          required: true
+          description: >
+            Human-readable label for the incident group.
+            e.g. "redis_cache_cascade", "payment-gateway-outage".
+      example:
+        action_type: "link_alerts"
+        alert_ids: ["alert-003", "alert-007", "alert-011"]
+        incident_label: "redis_cache_cascade"
+
+    skip:
+      description: >
+        Explicitly dismiss an alert identified as a false alarm.
+        Earns +0.20 if the alert is a true false alarm; -0.30 if it is a
+        real alert. Marks the alert as triaged.
+      fields:
+        action_type:
+          type: string
+          const: "skip"
+        alert_id:
+          type: string
+          required: true
+          description: ID of the alert to dismiss as a false alarm.
+      example:
+        action_type: "skip"
+        alert_id: "alert-010"
+
+# ─────────────────────────────────────────────────────────────
+# Reward Function
+# ─────────────────────────────────────────────────────────────
+reward_function:
+  type: dense
+  description: >
+    Per-step rewards provide dense signal on each decision component.
+    End-of-episode grader score is computed separately at done=True.
+  per_step:
+    triage_root_cause_exact:      +0.30
+    triage_severity_exact:        +0.30
+    triage_severity_within_1_level: +0.15
+    triage_remediation_exact:     +0.20
+    triage_incident_link_bonus:   +0.10
+    link_alerts_correct_pair:     +0.15
+    link_alerts_incorrect_pair:   -0.10
+    skip_true_false_alarm:        +0.20
+    skip_real_alert:              -0.30
+  penalties:
+    step_ge_80pct_budget:   -0.05
+    invalid_action_format:  -0.10
+    already_triaged_alert:  -0.15
+
+# ─────────────────────────────────────────────────────────────
+# Tasks
+# ─────────────────────────────────────────────────────────────
 tasks:
   - id: easy
     title: Basic Alert Classification
     description: >
       Triage 5 independent alerts with clear, unambiguous root causes.
       No correlated incidents, no noise.
+    num_alerts: 5
+    num_incidents: 0
+    noise_alerts: 0
+    max_steps: 10
+    default_seed: 42
+    grader_weights:
+      root_cause_accuracy: 0.40
+      severity_accuracy: 0.30
+      remediation_accuracy: 0.30
+      incident_link_f1: 0.00
+      false_alarm_accuracy: 0.00
+      stealth_bonus: 0.00
+    expected_score_range: [0.85, 1.0]
+    expected_score_gpt4: 0.95
 
   - id: medium
     title: Correlated Incident Response
@@ -32,6 +216,20 @@ tasks:
       Triage 15 alerts across 10 services including 2 cascading incidents
       and 2 false alarms. Requires dependency-graph reasoning to link
       correlated alerts before triaging.
+    num_alerts: 15
+    num_incidents: 2
+    noise_alerts: 2
+    max_steps: 25
+    default_seed: 42
+    grader_weights:
+      root_cause_accuracy: 0.30
+      severity_accuracy: 0.20
+      remediation_accuracy: 0.20
+      incident_link_f1: 0.20
+      false_alarm_accuracy: 0.10
+      stealth_bonus: 0.00
+    expected_score_range: [0.65, 0.85]
+    expected_score_gpt4: 0.78
 
   - id: hard
     title: Cascading Failure Under Noise
@@ -39,8 +237,40 @@ tasks:
       Triage 30 alerts across 15 services with 5 cascading incidents,
       6 false alarms (1 mislabeled CRITICAL), 1 stealth incident, and
       live cascade spawning for un-triaged critical alerts after step 5.
+    num_alerts: 30
+    num_incidents: 5
+    noise_alerts: 6
+    max_steps: 45
+    default_seed: 42
+    grader_weights:
+      root_cause_accuracy: 0.25
+      severity_accuracy: 0.20
+      remediation_accuracy: 0.15
+      incident_link_f1: 0.25
+      false_alarm_accuracy: 0.10
+      stealth_bonus: 0.10
+    expected_score_range: [0.40, 0.70]
+    expected_score_gpt4: 0.58
 
+# ─────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────
 endpoints:
   reset: /reset
   step: /step
   state: /state
+  health: /health
+
+# ─────────────────────────────────────────────────────────────
+# Runtime constraints
+# ─────────────────────────────────────────────────────────────
+runtime:
+  docker: true
+  port: 7860
+  health_endpoint: /health
+  server_framework: FastAPI + Uvicorn
+  python_version: "3.10"
+  episode_determinism: >
+    Fully deterministic given (task_id, seed). Uses a private random.Random
+    instance seeded at scenario generation time; global random is never touched.
+  concurrency: single-worker (not thread-safe; one episode at a time)
