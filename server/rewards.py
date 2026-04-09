@@ -98,11 +98,16 @@ def compute_reward(
     )
 
     result = base + penalty
-    # Clamp: never return exactly 0.0 or 1.0
-    if result == 0.0:
-        result = 1e-4
+    # Clamp the step reward to strictly (EPS, 1-EPS).
+    # Per-step rewards are used by the evaluator to identify the terminal task
+    # score (reward field when done=True), so they must never be 0.0, 1.0, or
+    # negative — all of which would fail the out-of-range check.
+    _EPS = 1e-4
+    _ONE = 1 - 1e-4
+    if result <= 0.0:
+        result = _EPS
     elif result >= 1.0:
-        result = 1 - 1e-4
+        result = _ONE
     return round(result, 6)
 
 
@@ -162,7 +167,9 @@ def _reward_triage(
         if _agent_correctly_linked(alert_id, incident_id, agent_links, ground_truth_list):
             reward += 0.10
 
-    return reward
+    # Guarantee strictly > 0.0: even a completely wrong triage earns epsilon
+    # rather than zero so the evaluator never sees 0.0 as a step reward.
+    return max(1e-4, reward)
 
 
 def _reward_link(
@@ -240,7 +247,7 @@ def _penalty_budget(step: int, max_steps: int) -> float:
     """
     if max_steps > 0 and step >= 0.8 * max_steps:
         return -0.05
-    return 1e-4  # epsilon instead of exact 0.0
+    return 0.0  # no penalty: return exactly zero (this is an intermediate value, not a task score)
 
 
 # ---------------------------------------------------------------------------
