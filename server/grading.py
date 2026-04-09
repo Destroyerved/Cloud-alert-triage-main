@@ -11,8 +11,18 @@ from server.config import SEVERITY_ORDER
 # Strict open-interval constants — score is ALWAYS in (EPS, 1-EPS)
 # ─────────────────────────────────────────────────────────────
 
-EPS = 0.01          # minimum score (0.01)
-ONE = 0.99          # maximum score (0.99)
+EPS = 0.01          # minimum score — guaranteed strictly > 0.0
+ONE = 0.99          # maximum score — guaranteed strictly < 1.0
+
+
+def _clamp(x: float) -> float:
+    """Clamp any float to the strict open interval (EPS, ONE)."""
+    import math
+    if not math.isfinite(x):
+        return 0.5
+    if x is None:
+        return 0.5
+    return max(EPS, min(ONE, float(x)))
 
 
 def _safe(x: float) -> float:
@@ -25,21 +35,15 @@ def _safe(x: float) -> float:
         x = float(x)
     except (TypeError, ValueError):
         return EPS
-    if math.isnan(x) or math.isinf(x):
-        return EPS
-    if x <= 0:
-        return EPS
-    if x >= 1:
-        return ONE
-    return x
+    return _clamp(x)
 
 
 def _safe_div(a: float, b: float) -> float:
-    """Division that returns EPS instead of 0/0 or n/0."""
+    """Division that returns EPS instead of 0/0 or n/0. Result is clamped to (EPS, ONE)."""
     if b == 0:
         return EPS
     result = a / b
-    return EPS if result == 0 else result
+    return _clamp(result)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -73,9 +77,8 @@ def grade_episode(
     except Exception:
         score = 0.5   # safe midpoint on unexpected failure
 
-    # Single final clamp — no round() after this
-    score = max(EPS, min(ONE, score))
-    return score
+    # Single final clamp via shared utility — no round() after this
+    return _clamp(score)
 
 
 def _grade_inner(

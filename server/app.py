@@ -170,6 +170,21 @@ async def step(body: Action) -> dict[str, Any]:
     return result.model_dump()
 
 
+@app.get("/score", summary="Return the current grader score")
+async def score() -> dict[str, Any]:
+    """
+    Return the grader_score for the current (or last completed) episode.
+    Score is guaranteed strictly in (0.01, 0.99) when an episode has ended.
+    Returns 0.5 as a safe default if no episode has completed yet.
+    """
+    if not env._active:
+        return {"grader_score": 0.5, "done": False}
+    if env._done and env._grader_score is not None:
+        s = max(0.01, min(0.99, float(env._grader_score)))
+        return {"grader_score": s, "done": True}
+    return {"grader_score": 0.5, "done": env._done}
+
+
 @app.get("/state", summary="Inspect full internal state (debug / grading)")
 async def state() -> dict[str, Any]:
     """

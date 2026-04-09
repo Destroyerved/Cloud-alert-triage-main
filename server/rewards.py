@@ -98,16 +98,14 @@ def compute_reward(
     )
 
     result = base + penalty
-    # Clamp the step reward to strictly (EPS, 1-EPS).
+    # Clamp the step reward to strictly (0.01, 0.99).
     # Per-step rewards are used by the evaluator to identify the terminal task
     # score (reward field when done=True), so they must never be 0.0, 1.0, or
-    # negative — all of which would fail the out-of-range check.
-    _EPS = 1e-4
-    _ONE = 1 - 1e-4
+    # out of range — all of which would fail the open-interval check.
     if result <= 0.0:
-        result = _EPS
+        result = 0.01
     elif result >= 1.0:
-        result = _ONE
+        result = 0.99
     return round(result, 6)
 
 

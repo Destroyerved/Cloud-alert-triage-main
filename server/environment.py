@@ -427,11 +427,11 @@ class AlertTriageEnv:
                 raw = grade_episode(self._task_id, self._make_state_snapshot())
             except Exception:
                 raw = 0.5
-            # Triple-enforce: must be strictly inside (0, 1)
+            # Enforce: must be strictly inside (0.01, 0.99)
             import math as _math
             if not _math.isfinite(raw):
                 raw = 0.5
-            self._grader_score = max(1e-4, min(1 - 1e-4, float(raw)))
+            self._grader_score = max(0.01, min(0.99, float(raw)))
 
     def _make_info(self) -> dict[str, Any]:
         """Return info dict with grader_score whenever done=True.
@@ -444,10 +444,10 @@ class AlertTriageEnv:
         if self._done:
             score = self._grader_score if self._grader_score is not None else 0.5
             import math as _math
-            if not _math.isfinite(score):
+            if not _math.isfinite(float(score)):
                 score = 0.5
-            # Clamp to strict open interval — NO round() after this point.
-            score = max(1e-4, min(1 - 1e-4, float(score)))
+            # Clamp to strict open interval (0.01, 0.99) — NO round() after this.
+            score = max(0.01, min(0.99, float(score)))
             return {"grader_score": score}
         return {}
 
