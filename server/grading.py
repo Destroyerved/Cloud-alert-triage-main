@@ -47,8 +47,8 @@ def _safe_div(a: float, b: float) -> float:
 # ─────────────────────────────────────────────────────────────
 
 _WEIGHTS: dict[str, dict[str, float]] = {
-    "easy":   {"rc": 0.39, "sev": 0.29, "rem": 0.29, "link": 0.01, "fa": 0.02},
-    "medium": {"rc": 0.28, "sev": 0.19, "rem": 0.19, "link": 0.20, "fa": 0.14},
+    "easy":   {"rc": 0.39, "sev": 0.29, "rem": 0.29, "link": 0.01, "fa": 0.01},
+    "medium": {"rc": 0.28, "sev": 0.19, "rem": 0.19, "link": 0.20, "fa": 0.13},
     "hard":   {"rc": 0.24, "sev": 0.19, "rem": 0.14, "link": 0.24, "fa": 0.14},
 }
 

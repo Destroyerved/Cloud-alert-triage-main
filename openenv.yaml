@@ -3,28 +3,34 @@ description: Cloud alert triage environment for incident management
 
 tasks:
   - name: easy
-    description: Basic alert triage
+    description: Basic alert triage — 5 independent alerts, clear root causes
     grader_weights:
-      alert_classification_f1: 0.39
-      incident_link_f1: 0.19
-      false_alarm_accuracy: 0.19
-      stealth_bonus: 0.23
+      root_cause_accuracy: 0.39
+      severity_accuracy: 0.29
+      remediation_accuracy: 0.29
+      incident_link_f1: 0.01
+      false_alarm_accuracy: 0.01
+      stealth_bonus: 0.01
 
   - name: medium
-    description: Moderate alert triage with noise
+    description: Moderate alert triage with correlated incidents and noise
     grader_weights:
-      alert_classification_f1: 0.34
-      incident_link_f1: 0.24
-      false_alarm_accuracy: 0.19
-      stealth_bonus: 0.23
+      root_cause_accuracy: 0.28
+      severity_accuracy: 0.19
+      remediation_accuracy: 0.19
+      incident_link_f1: 0.20
+      false_alarm_accuracy: 0.13
+      stealth_bonus: 0.01
 
   - name: hard
-    description: Complex alert triage with adversarial noise
+    description: Complex alert triage with cascading failures and adversarial noise
     grader_weights:
-      alert_classification_f1: 0.29
-      incident_link_f1: 0.29
-      false_alarm_accuracy: 0.19
-      stealth_bonus: 0.23
+      root_cause_accuracy: 0.24
+      severity_accuracy: 0.19
+      remediation_accuracy: 0.14
+      incident_link_f1: 0.24
+      false_alarm_accuracy: 0.14
+      stealth_bonus: 0.05
 
 metadata:
   evaluation_metric: weighted_score

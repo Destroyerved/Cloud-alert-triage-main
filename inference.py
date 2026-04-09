@@ -55,6 +55,23 @@ import httpx
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
+# Safe score clamping
+# ---------------------------------------------------------------------------
+
+EPS = 1e-4
+
+def fix_score(x):
+    try:
+        x = float(x)
+    except:
+        return EPS
+    if x <= 0:
+        return EPS
+    if x >= 1:
+        return 1 - EPS
+    return x
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -774,11 +791,11 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
             rewards.append(reward)
 
             if done:
-                # reward IS grader_score when done=True (environment guarantees this)
-                grader_score = max(1e-4, min(1 - 1e-4, float(result.get("reward", reward))))
-                # Also read from info as backup
-                info_score = float(info.get("grader_score", grader_score))
-                grader_score = max(1e-4, min(1 - 1e-4, info_score))
+                # info["grader_score"] is the authoritative source; reward is the fallback
+                raw_score = info.get("grader_score")
+                if raw_score is None:
+                    raw_score = result.get("reward", reward)
+                grader_score = fix_score(raw_score)
 
             log_step(step_num, action, reward, done, error)
 
@@ -800,9 +817,11 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
                 step_num += 1
                 rewards.append(reward)
                 if done:
-                    grader_score = max(1e-4, min(1 - 1e-4, float(result.get("reward", 1e-4))))
-                    info_score = float(result.get("info", {}).get("grader_score", grader_score))
-                    grader_score = max(1e-4, min(1 - 1e-4, info_score))
+                    # info["grader_score"] is the authoritative source; reward is the fallback
+                    raw_score = result.get("info", {}).get("grader_score")
+                    if raw_score is None:
+                        raw_score = result.get("reward", 1e-4)
+                    grader_score = fix_score(raw_score)
                 log_step(step_num, action, reward, done, None)
 
     except Exception as exc:
@@ -811,8 +830,8 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
     finally:
         log_end(done, step_num, rewards)  # Always emitted — required by spec
         # Clamp once more before any emission — strictly inside (0, 1)
-        grader_score = max(1e-4, min(1 - 1e-4, grader_score))
-        print(f"[SCORE] task={task_id} grader_score={grader_score:.4f}", file=sys.stderr)
+        grader_score = fix_score(grader_score)
+        print(f"[SCORE] task={task_id} grader_score={grader_score:.8f}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
