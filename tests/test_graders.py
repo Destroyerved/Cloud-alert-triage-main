@@ -58,10 +58,10 @@ ALL_WRONG_DECISIONS_5 = [
 class TestEasyGrader:
 
     def test_perfect_run_scores_max(self):
-        """Perfect decisions on easy task → 0.9999 (grader ceiling)."""
+        """Perfect decisions on easy task → 0.999 (grader ceiling)."""
         state = _make_state("easy", PERFECT_DECISIONS_5, GROUND_TRUTH_5)
         score = grade_episode("easy", state)
-        assert score == pytest.approx(0.9999)
+        assert score == pytest.approx(0.999)
 
     def test_all_wrong_scores_near_zero(self):
         """All wrong decisions → score close to 0.0."""
@@ -71,10 +71,10 @@ class TestEasyGrader:
         assert score < 0.15
 
     def test_empty_decisions_scores_floor(self):
-        """No decisions at all (agent made no moves) → 0.0001 (grader floor)."""
+        """No decisions at all (agent made no moves) → 0.001 (grader floor)."""
         state = _make_state("easy", [], GROUND_TRUTH_5)
         score = grade_episode("easy", state)
-        assert score == pytest.approx(0.0001)
+        assert score == pytest.approx(0.001)
 
     def test_partial_run_in_range(self):
         """Triaging 3/5 correctly, 2 untriaged → score between 0 and 1."""
@@ -86,7 +86,7 @@ class TestEasyGrader:
         assert 0.0 < score < 1.0
 
     def test_score_always_in_range(self):
-        """Grader output is always clamped to strictly open interval (0.0001, 0.9999)."""
+        """Grader output is always clamped to strictly open interval (0.001, 0.999)."""
         for decisions in [PERFECT_DECISIONS_5, ALL_WRONG_DECISIONS_5, []]:
             state = _make_state("easy", decisions, GROUND_TRUTH_5)
             score = grade_episode("easy", state)
@@ -204,7 +204,7 @@ class TestMediumGrader:
         assert grade_episode("medium", state_with_skip) > grade_episode("medium", state_no_skip)
 
     def test_score_in_range(self):
-        """Medium grader always returns strictly open interval (0.0001, 0.9999)."""
+        """Medium grader always returns strictly open interval (0.001, 0.999)."""
         for decisions in [[], _PERFECT_TRIAGE_MEDIUM, _PERFECT_TRIAGE_MEDIUM + _CORRECT_LINKS_MEDIUM]:
             score = grade_episode("medium", _make_state("medium", decisions, _GT_MEDIUM))
             assert 0.0 < score < 1.0
@@ -291,7 +291,7 @@ class TestHardGrader:
         assert (hard_with_link - hard_no_link) > (med_with_link - med_no_link)
 
     def test_score_in_range(self):
-        """Hard grader always returns strictly open interval (0.0001, 0.9999)."""
+        """Hard grader always returns strictly open interval (0.001, 0.999)."""
         for decisions in [[], _STEALTH_CORRECT_TRIAGE, _STEALTH_WRONG_TRIAGE]:
             score = grade_episode("hard", _make_state("hard", decisions, _GT_HARD))
             assert 0.0 < score < 1.0

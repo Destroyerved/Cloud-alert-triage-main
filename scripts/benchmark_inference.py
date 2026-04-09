@@ -13,7 +13,7 @@ Log format contract (from inference.py):
     stdout: [END]   success=<b> steps=<n> rewards=<r1,r2,...>
     stderr: [SCORE] task=<t> grader_score=<f>   <- grader score is on STDERR
 
-All grader scores are guaranteed in (0.0001, 0.9999) -- never 0.0 or 1.0.
+All grader scores are guaranteed in (0.001, 0.999) -- never 0.0 or 1.0.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def run_inference(seed: int, api_key: str | None) -> dict:
     steps_by_task: dict[str, int] = {t: s for t, s in zip(task_order, end_steps)}
 
     # ── grader scores from stderr ────────────────────────────────────────────
-    # [SCORE] task=easy grader_score=0.9999
+    # [SCORE] task=easy grader_score=0.999
     scores: dict[str, float] = {}
     for m in re.finditer(r"\[SCORE\] task=(\w+) grader_score=([\d.]+)", proc.stderr):
         scores[m.group(1)] = float(m.group(2))

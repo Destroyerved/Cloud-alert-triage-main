@@ -19,7 +19,7 @@ An SRE alert triage environment where an AI agent must classify, correlate, and 
 
 ✔ **What:** A gym-style OpenEnv environment exposing three REST endpoints (`/reset`, `/step`, `/state`). The agent receives a batch of cloud monitoring alerts and a service dependency map, then issues structured triage/link/skip actions step by step.  
 ✔ **Why:** Models the hardest real-world SRE problem — cascading failures with noisy, misleading signals — which no existing OpenEnv environment addresses.  
-✔ **How:** Plan-then-execute baseline agent achieves **0.9999 on all tasks** via single-shot LLM planning with deterministic severity inference and hardcoded remediation mappings.  
+✔ **How:** Plan-then-execute baseline agent achieves **0.999 on all tasks** via single-shot LLM planning with deterministic severity inference and hardcoded remediation mappings.  
 ✔ **Verified:** 232 passing tests, deterministic grading, Docker-ready.
 
 ---
@@ -63,7 +63,7 @@ The agent interacts with the environment through a simple request/response loop:
 
 **6. Cascade** — After step 5, any original `critical` or `high` alert still un-triaged spawns one new dependent alert on a downstream service (deterministic from the graph). This increases the alert queue, modeling how real incidents escalate without intervention. Delay is directly penalized.
 
-**7. Episode end** — When all alerts are covered or `max_steps` is reached, `done=true`. The grader runs once and returns `info["grader_score"]` as a deterministic score in the strictly open interval **(0.0001, 0.9999)** — never exactly 0 or 1. Dynamic cascade alerts are excluded from grader scoring — only the original scenario alerts count.
+**7. Episode end** — When all alerts are covered or `max_steps` is reached, `done=true`. The grader runs once and returns `info["grader_score"]` as a deterministic score in the strictly open interval **(0.001, 0.999)** — never exactly 0 or 1. Dynamic cascade alerts are excluded from grader scoring — only the original scenario alerts count.
 
 ---
 
@@ -122,7 +122,7 @@ The data layer is the cascade origin in most incidents. Failures propagate upwar
 
 | ID | Title | Alerts | Steps | Incidents | False Alarms | Expected Score |
 |---|---|---|---|---|---|---|
-| `easy` | Basic Alert Classification | 5 | 10 | 0 | 0 | 0.85 – 0.9999 |
+| `easy` | Basic Alert Classification | 5 | 10 | 0 | 0 | 0.85 – 0.999 |
 | `medium` | Correlated Incident Response | 15 | 25 | 2 | 2 | 0.65 – 0.85 |
 | `hard` | Cascading Failure Under Noise | 30 | 45 | 5 | 6 | 0.40 – 0.70 |
 
@@ -248,7 +248,7 @@ The reward function is multi-dimensional to ensure the agent receives signal on 
 
 ## Grader (End-of-Episode Score)
 
-The grader computes a deterministic score in the strictly open interval **(0.0001, 0.9999)** at episode end — never exactly 0 or 1. Un-triaged alerts count as incorrect on all components.
+The grader computes a deterministic score in the strictly open interval **(0.001, 0.999)** at episode end — never exactly 0 or 1. Un-triaged alerts count as incorrect on all components.
 
 ### Component weights
 
@@ -279,11 +279,11 @@ Scores recorded with `seed=42`, `temperature=0`, model `llama-3.3-70b-versatile`
 
 | Task | Model | Grader Score | Steps Used |
 |---|---|---|---|
-| easy | llama-3.3-70b-versatile | 0.9999 | 5 |
-| medium | llama-3.3-70b-versatile | 0.9999 | 25 |
-| hard | llama-3.3-70b-versatile | 0.9999 | 45 |
+| easy | llama-3.3-70b-versatile | 0.999 | 5 |
+| medium | llama-3.3-70b-versatile | 0.999 | 25 |
+| hard | llama-3.3-70b-versatile | 0.999 | 45 |
 
-**Why does the baseline beat the expected score range on hard (0.9999 vs. 0.40–0.70)?**
+**Why does the baseline beat the expected score range on hard (0.999 vs. 0.40–0.70)?**
 
 The baseline uses a **plan-then-execute** strategy that eliminates the information disadvantage that makes `hard` difficult for reactive agents:
 
