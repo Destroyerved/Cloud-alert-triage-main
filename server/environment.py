@@ -436,17 +436,19 @@ class AlertTriageEnv:
     def _make_info(self) -> dict[str, Any]:
         """Return info dict with grader_score whenever done=True.
 
-        grader_score is guaranteed strictly in (1e-4, 1-1e-4) — never 0 or 1.
-        Even if _grader_score was never set, we return a safe fallback so the
-        evaluator always gets a valid value, never a missing key.
+        grader_score is STRICTLY in (1e-4, 1-1e-4) — never 0.0, never 1.0.
+        No round() is applied after clamping: round() can push a float that is
+        only epsilon below 1.0 up to exactly 1.0 via IEEE-754 rounding, which
+        would fail the open-interval requirement.
         """
         if self._done:
             score = self._grader_score if self._grader_score is not None else 0.5
             import math as _math
             if not _math.isfinite(score):
                 score = 0.5
+            # Clamp to strict open interval — NO round() after this point.
             score = max(1e-4, min(1 - 1e-4, float(score)))
-            return {"grader_score": round(score, 4)}
+            return {"grader_score": score}
         return {}
 
     # ─────────────────────────────────────────────────────────────────────────
