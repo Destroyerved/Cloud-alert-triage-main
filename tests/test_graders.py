@@ -58,24 +58,10 @@ ALL_WRONG_DECISIONS_5 = [
 class TestEasyGrader:
 
     def test_perfect_run_scores_max(self):
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-        """Perfect decisions on easy task → 0.9999 (grader ceiling)."""
-        state = _make_state("easy", PERFECT_DECISIONS_5, GROUND_TRUTH_5)
-        score = grade_episode("easy", state)
-        assert score == pytest.approx(0.9999)
-=======
         """Perfect decisions on easy task → 0.99 (grader ceiling)."""
         state = _make_state("easy", PERFECT_DECISIONS_5, GROUND_TRUTH_5)
         score = grade_episode("easy", state)
         assert score == pytest.approx(0.99)
->>>>>>> Stashed changes
-=======
-        """Perfect decisions on easy task → 0.999 (grader ceiling)."""
-        state = _make_state("easy", PERFECT_DECISIONS_5, GROUND_TRUTH_5)
-        score = grade_episode("easy", state)
-        assert score == pytest.approx(0.999)
->>>>>>> e16eacda134bcc952591cec09aea3537a4fd3ba1
 
     def test_all_wrong_scores_near_zero(self):
         """All wrong decisions → score close to 0.0."""
@@ -85,24 +71,10 @@ class TestEasyGrader:
         assert score < 0.15
 
     def test_empty_decisions_scores_floor(self):
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-        """No decisions at all (agent made no moves) → 0.0001 (grader floor)."""
-        state = _make_state("easy", [], GROUND_TRUTH_5)
-        score = grade_episode("easy", state)
-        assert score == pytest.approx(0.0001)
-=======
         """No decisions at all (agent made no moves) → 0.01 (grader floor)."""
         state = _make_state("easy", [], GROUND_TRUTH_5)
         score = grade_episode("easy", state)
         assert score == pytest.approx(0.01)
->>>>>>> Stashed changes
-=======
-        """No decisions at all (agent made no moves) → 0.001 (grader floor)."""
-        state = _make_state("easy", [], GROUND_TRUTH_5)
-        score = grade_episode("easy", state)
-        assert score == pytest.approx(0.001)
->>>>>>> e16eacda134bcc952591cec09aea3537a4fd3ba1
 
     def test_partial_run_in_range(self):
         """Triaging 3/5 correctly, 2 untriaged → score between 0 and 1."""

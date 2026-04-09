@@ -58,17 +58,21 @@ from openai import OpenAI
 # Safe score clamping
 # ---------------------------------------------------------------------------
 
-EPS = 1e-4
+EPS = 0.01   # minimum score — strictly > 0.0
+ONE = 0.99   # maximum score — strictly < 1.0
 
 def fix_score(x):
+    """Clamp any score to strictly open interval (EPS, ONE)."""
     try:
         x = float(x)
-    except:
+    except Exception:
+        return EPS
+    if x is None or x != x:  # None or NaN
         return EPS
     if x <= 0:
         return EPS
     if x >= 1:
-        return 1 - EPS
+        return ONE
     return x
 
 # ---------------------------------------------------------------------------
@@ -762,7 +766,7 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
     rewards:      list[float] = []
     done:         bool        = False
     step_num:     int         = 0
-    grader_score: float       = 1e-4
+    grader_score: float       = EPS
 
     try:
         obs = _env_reset(http, task_id, DEFAULT_SEED)
@@ -780,10 +784,10 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
                 result = _env_step(http, action)
             except Exception as exc:
                 error = str(exc)
-                log_step(step_num + 1, action, 0.0, False, error)
+                log_step(step_num + 1, action, EPS, False, error)
                 break
 
-            reward   = float(result.get("reward",  0.0))
+            reward   = fix_score(result.get("reward", EPS))
             done     = bool(result.get("done",    False))
             info     = result.get("info", {})
             obs      = result.get("observation", obs)
@@ -809,10 +813,11 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
                 try:
                     result = _env_step(http, action)
                 except Exception as exc:
-                    log_step(step_num + 1, action, 0.0, False, str(exc))
+                    log_step(step_num + 1, action, EPS, False, str(exc))
                     break
-                reward   = float(result.get("reward",  0.0))
+                reward   = fix_score(result.get("reward", EPS))
                 done     = bool(result.get("done",    False))
+                info     = result.get("info", {})
                 obs      = result.get("observation", obs)
                 step_num += 1
                 rewards.append(reward)
@@ -820,7 +825,7 @@ def run_task(task_id: str, llm: OpenAI, http: httpx.Client, deadline: float) -> 
                     # info["grader_score"] is the authoritative source; reward is the fallback
                     raw_score = result.get("info", {}).get("grader_score")
                     if raw_score is None:
-                        raw_score = result.get("reward", 1e-4)
+                        raw_score = result.get("reward", EPS)
                     grader_score = fix_score(raw_score)
                 log_step(step_num, action, reward, done, None)
 
