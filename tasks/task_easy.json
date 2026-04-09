@@ -8,7 +8,11 @@
   "num_incidents": 0,
   "noise_alerts": 0,
   "max_steps": 10,
+<<<<<<< Updated upstream
   "expected_score_range": [0.85, 0.9999],
+=======
+  "expected_score_range": [0.85, 0.99],
+>>>>>>> Stashed changes
   "grader_weights": {
     "root_cause_accuracy": 0.39,
     "severity_accuracy": 0.29,
