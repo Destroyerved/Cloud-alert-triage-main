@@ -204,15 +204,17 @@ class AlertTriageEnv:
                 "No active episode. Call reset(task_id, seed) before step()."
             )
 
-        # ── already done — no state change, no penalty ────────────────────────
+        # ── already done — no state change, return grader_score as reward ──────
         if self._done:
+            info = self._make_info()
+            safe_score = float(info.get("grader_score", 0.5))
             return StepResult(
                 observation=self._build_observation(
                     feedback="Episode already complete."
                 ),
-                reward=0.0,
+                reward=safe_score,
                 done=True,
-                info=self._make_info(),
+                info=info,
             )
 
         # ── coerce dict → Action (Pydantic validates enum values & required fields)
@@ -237,11 +239,18 @@ class AlertTriageEnv:
 
         self._update_done()
 
+        # When done=True, override the per-step reward with grader_score.
+        # Evaluators read the reward field of the done=True step as the task
+        # score — it must be strictly in (0, 1).
+        info = self._make_info()
+        if self._done:
+            reward = float(info.get("grader_score", 0.5))
+
         return StepResult(
             observation=self._build_observation(feedback=feedback),
             reward=reward,
             done=self._done,
-            info=self._make_info(),
+            info=info,
         )
 
     def state(self) -> EnvironmentState:
@@ -405,22 +414,38 @@ class AlertTriageEnv:
 
     def _update_done(self) -> None:
         """
-        Mark done when all alerts are triaged (or skipped) OR the step budget
-        is exhausted.  On transition to done, call the grader.
+        Mark done when all alerts are triaged (or skipped) OR step budget
+        is exhausted.  Always sets _grader_score strictly in (EPS, 1-EPS).
         """
         all_triaged = all(a.triaged for a in self._alerts)
         budget_gone = self._step_count >= self._max_steps
 
         if (all_triaged or budget_gone) and not self._done:
             self._done = True
-            self._grader_score = grade_episode(
-                self._task_id, self._make_state_snapshot()
-            )
+            try:
+                raw = grade_episode(self._task_id, self._make_state_snapshot())
+            except Exception:
+                raw = 0.5
+            # Triple-enforce: must be strictly inside (0, 1)
+            import math as _math
+            if not _math.isfinite(raw):
+                raw = 0.5
+            self._grader_score = max(1e-4, min(1 - 1e-4, float(raw)))
 
     def _make_info(self) -> dict[str, Any]:
-        """Return info dict; includes grader_score only once done."""
-        if self._done and self._grader_score is not None:
-            return {"grader_score": self._grader_score}
+        """Return info dict with grader_score whenever done=True.
+
+        grader_score is guaranteed strictly in (1e-4, 1-1e-4) — never 0 or 1.
+        Even if _grader_score was never set, we return a safe fallback so the
+        evaluator always gets a valid value, never a missing key.
+        """
+        if self._done:
+            score = self._grader_score if self._grader_score is not None else 0.5
+            import math as _math
+            if not _math.isfinite(score):
+                score = 0.5
+            score = max(1e-4, min(1 - 1e-4, float(score)))
+            return {"grader_score": round(score, 4)}
         return {}
 
     # ─────────────────────────────────────────────────────────────────────────

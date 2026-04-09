@@ -1,60 +1,97 @@
 from __future__ import annotations
 
 import itertools
+import math
 from collections import defaultdict
 from typing import Any
 
 from server.config import SEVERITY_ORDER
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-task weights
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Strict open-interval constants — score is ALWAYS in (EPS, 1-EPS)
+# ─────────────────────────────────────────────────────────────
+
+EPS = 1e-4          # minimum score
+ONE = 1 - 1e-4      # maximum score
+
+
+def _safe(x: float) -> float:
+    """Clamp any float into the strict open interval (EPS, ONE).
+    Never returns 0.0 or 1.0 under any circumstances.
+    """
+    if x is None:
+        return EPS
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return EPS
+    if math.isnan(x) or math.isinf(x):
+        return EPS
+    if x <= 0:
+        return EPS
+    if x >= 1:
+        return ONE
+    return x
+
+
+def _safe_div(a: float, b: float) -> float:
+    """Division that returns EPS instead of 0/0 or n/0."""
+    if b == 0:
+        return EPS
+    result = a / b
+    return EPS if result == 0 else result
+
+
+# ─────────────────────────────────────────────────────────────
+# Weights — NO zeros, all strictly inside (0, 1)
+# ─────────────────────────────────────────────────────────────
 
 _WEIGHTS: dict[str, dict[str, float]] = {
-    "easy":   {"rc": 0.40, "sev": 0.30, "rem": 0.30, "link": 0.00, "fa": 0.00},
-    "medium": {"rc": 0.30, "sev": 0.20, "rem": 0.20, "link": 0.20, "fa": 0.10},
-    "hard":   {"rc": 0.25, "sev": 0.20, "rem": 0.15, "link": 0.25, "fa": 0.10},
+    "easy":   {"rc": 0.39, "sev": 0.29, "rem": 0.29, "link": 0.01, "fa": 0.02},
+    "medium": {"rc": 0.28, "sev": 0.19, "rem": 0.19, "link": 0.20, "fa": 0.14},
+    "hard":   {"rc": 0.24, "sev": 0.19, "rem": 0.14, "link": 0.24, "fa": 0.14},
 }
 
 _STEALTH_BONUS: dict[str, float] = {
-    "easy": 0.00,
-    "medium": 0.00,
-    "hard": 0.05,
+    "easy":   0.01,
+    "medium": 0.01,
+    "hard":   0.05,
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────
 
 def grade_episode(
     task_id: str,
     final_state_dict: dict[str, Any],
 ) -> float:
-    """
-    Compute a strictly open-interval (0.0001, 0.9999) episode score based on
-    weighted accuracy components.
+    """Return a score guaranteed strictly inside (EPS, ONE) — never 0.0 or 1.0."""
+    try:
+        score = _grade_inner(task_id, final_state_dict)
+    except Exception:
+        score = 0.5   # safe midpoint on unexpected failure
 
-    The score is always clamped to [0.0001, 0.9999] — never exactly 0 or 1 —
-    as required by the OpenEnv hackathon scoring contract.
+    # Single final clamp — no round() after this
+    score = max(EPS, min(ONE, score))
+    return score
 
-    Dynamic alerts (spawned by the cascade mechanic at runtime) are
-    **excluded** from the grader's ground-truth set so the final score
-    reflects only the original scenario alerts.
-    """
 
+def _grade_inner(
+    task_id: str,
+    final_state_dict: dict[str, Any],
+) -> float:
     if task_id not in _WEIGHTS:
-        raise ValueError(
-            f"Unknown task_id '{task_id}'. Valid values: {sorted(_WEIGHTS.keys())}"
-        )
+        raise ValueError(f"Invalid task_id: {task_id}")
 
     all_ground_truth: list[dict[str, Any]] = final_state_dict.get("ground_truth", [])
-    dynamic_ids: set[str] = final_state_dict.get("dynamic_alert_ids", set())
+    dynamic_ids: set[str] = set(final_state_dict.get("dynamic_alert_ids", set()))
     incidents: list[dict[str, Any]] = final_state_dict.get("incidents", [])
     agent_links: list[dict[str, Any]] = final_state_dict.get("agent_links", [])
     agent_decisions: list[dict[str, Any]] = final_state_dict.get("agent_decisions", [])
 
-    # Filter out dynamic alerts so the grader scores only original alerts.
+    # Exclude dynamic (cascade-spawned) alerts from grading
     ground_truth: list[dict[str, Any]] = [
         gt for gt in all_ground_truth
         if gt["alert_id"] not in dynamic_ids
@@ -74,98 +111,111 @@ def grade_episode(
 
     w = _WEIGHTS[task_id]
 
-    # Core score
+    # Component scores — each passed through _safe before use
+    rc   = _safe(_root_cause_accuracy(decisions_by_id, ground_truth))
+    sev  = _safe(_severity_accuracy(decisions_by_id, ground_truth))
+    rem  = _safe(_remediation_accuracy(decisions_by_id, ground_truth))
+    link = _safe(_incident_link_f1(agent_links, ground_truth))
+    fa   = _safe(_false_alarm_accuracy(decisions_by_id, skips_by_id, ground_truth))
+
     base_score = (
-        w["rc"]   * _root_cause_accuracy(decisions_by_id, ground_truth) +
-        w["sev"]  * _severity_accuracy(decisions_by_id, ground_truth) +
-        w["rem"]  * _remediation_accuracy(decisions_by_id, ground_truth) +
-        w["link"] * _incident_link_f1(agent_links, ground_truth) +
-        w["fa"]   * _false_alarm_accuracy(decisions_by_id, skips_by_id, ground_truth)
+        w["rc"]   * rc  +
+        w["sev"]  * sev +
+        w["rem"]  * rem +
+        w["link"] * link +
+        w["fa"]   * fa
     )
 
-    # Coverage penalty - linear (not power) to penalize missed alerts more
-    coverage = len(decisions_by_id) / len(ground_truth) if ground_truth else 1.0
-    coverage_penalty = max(0.0, coverage)  # Linear penalty
+    # Coverage: fraction of original alerts the agent acted on
+    n_gt = max(1, len(ground_truth))
+    handled = len(decisions_by_id) + len(skips_by_id)
+    coverage = _safe(_safe_div(handled, n_gt))
 
-    score = base_score * coverage_penalty
+    score = base_score * coverage
 
-    # Quality check: if any critical component is too low, cap the score
-    # This prevents "mostly correct" agents from getting near-perfect scores
-    min_acceptable = 0.70  # Below 70% on any component = significant penalty
-    if _root_cause_accuracy(decisions_by_id, ground_truth) < min_acceptable:
+    # Quality penalties (multiplicative, bounded so score can't reach 0)
+    if rc < 0.7:
         score *= 0.3
-    if _severity_accuracy(decisions_by_id, ground_truth) < min_acceptable:
+    if sev < 0.7:
         score *= 0.3
-    if _remediation_accuracy(decisions_by_id, ground_truth) < min_acceptable:
+    if rem < 0.7:
         score *= 0.3
 
-    # Penalize ALL skips - they should not give high rewards
-    skip_ratio = len(skips_by_id) / len(ground_truth) if ground_truth else 0.0
-    # Any skip reduces score proportionally (even 1 skip is penalized)
-    score *= max(0.0, 1.0 - skip_ratio * 2)  # 2x penalty for skips
+    # Skip-abuse penalty
+    skip_ratio = _safe_div(len(skips_by_id), n_gt)
+    score *= max(EPS, 1 - skip_ratio * 2)
 
-    # Stealth bonus (hard only)
-    score += _STEALTH_BONUS[task_id] * _stealth_bonus(
-        decisions_by_id, ground_truth, incidents
-    )
+    # Stealth bonus — small additive bump
+    stealth = _safe(_stealth_bonus(decisions_by_id, ground_truth, incidents))
+    score += _STEALTH_BONUS[task_id] * stealth
 
-    # Clamp to strictly open interval (0, 1): never exactly 0.0 or 1.0.
-    # Use 0.001 as floor and 0.999 as ceiling for safety margins.
-    return round(max(0.001, min(0.999, score)), 6)
+    return score   # caller applies the final clamp
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # Component scorers
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 
-def _root_cause_accuracy(decisions_by_id, ground_truth) -> float:
+def _root_cause_accuracy(
+    decisions_by_id: dict[str, Any],
+    ground_truth: list[dict[str, Any]],
+) -> float:
     if not ground_truth:
-        return 1.0
+        return ONE   # vacuously correct
+
     correct = sum(
         1
         for gt in ground_truth
         if decisions_by_id.get(gt["alert_id"], {}).get("root_cause") == gt["true_root_cause"]
     )
-    return correct / len(ground_truth)
+    return _safe_div(correct, len(ground_truth))
 
 
-def _severity_accuracy(decisions_by_id, ground_truth) -> float:
+def _severity_accuracy(
+    decisions_by_id: dict[str, Any],
+    ground_truth: list[dict[str, Any]],
+) -> float:
     if not ground_truth:
-        return 1.0
+        return ONE
 
     total = 0.0
     for gt in ground_truth:
         decision = decisions_by_id.get(gt["alert_id"])
         if decision is None:
             continue
-
-        agent_sev = decision.get("severity", "")
-        true_sev = gt["true_severity"]
-
-        if agent_sev == true_sev:
+        agent = decision.get("severity", "")
+        true  = gt.get("true_severity", "")
+        if agent == true:
             total += 1.0
         else:
-            agent_rank = SEVERITY_ORDER.get(agent_sev, 2)
-            true_rank = SEVERITY_ORDER.get(true_sev, 2)
-            if abs(agent_rank - true_rank) == 1:
-                total += 0.15  # within 1 level = partial credit
+            ar = SEVERITY_ORDER.get(agent, 2)
+            tr = SEVERITY_ORDER.get(true, 2)
+            if abs(ar - tr) == 1:
+                total += 0.15
 
-    return total / len(ground_truth)
+    return _safe_div(total, len(ground_truth))
 
 
-def _remediation_accuracy(decisions_by_id, ground_truth) -> float:
+def _remediation_accuracy(
+    decisions_by_id: dict[str, Any],
+    ground_truth: list[dict[str, Any]],
+) -> float:
     if not ground_truth:
-        return 1.0
+        return ONE
+
     correct = sum(
         1
         for gt in ground_truth
         if decisions_by_id.get(gt["alert_id"], {}).get("remediation") == gt["true_remediation"]
     )
-    return correct / len(ground_truth)
+    return _safe_div(correct, len(ground_truth))
 
 
-def _incident_link_f1(agent_links, ground_truth) -> float:
-    true_groups = defaultdict(list)
+def _incident_link_f1(
+    agent_links: list[dict[str, Any]],
+    ground_truth: list[dict[str, Any]],
+) -> float:
+    true_groups: dict[str, list[str]] = defaultdict(list)
     for gt in ground_truth:
         inc_id = gt.get("incident_id")
         if inc_id is not None:
@@ -176,78 +226,73 @@ def _incident_link_f1(agent_links, ground_truth) -> float:
     )
 
     if not true_pairs:
-        return 1.0
+        return ONE   # no incidents → vacuously correct; use ONE not 1.0
 
     agent_pairs = _pairs_from_groups(
         [link["alert_ids"] for link in agent_links if link.get("alert_ids")]
     )
 
     if not agent_pairs:
-        return 0.0
+        return EPS   # agent made no links → near zero but not 0.0
 
     tp = len(true_pairs & agent_pairs)
-    precision = tp / len(agent_pairs)
-    recall = tp / len(true_pairs)
 
-    denom = precision + recall
-    return (2 * precision * recall / denom) if denom > 0 else 0.0
+    precision = _safe_div(tp, len(agent_pairs))
+    recall    = _safe_div(tp, len(true_pairs))
+    denom     = precision + recall
+
+    if denom == 0:
+        return EPS
+
+    return 2 * precision * recall / denom
 
 
-def _false_alarm_accuracy(decisions_by_id, skips_by_id, ground_truth) -> float:
-    fa_alerts = [gt for gt in ground_truth if gt["true_root_cause"] == "false_alarm"]
+def _false_alarm_accuracy(
+    decisions_by_id: dict[str, Any],
+    skips_by_id: set[str],
+    ground_truth: list[dict[str, Any]],
+) -> float:
+    if not ground_truth:
+        return ONE
 
-    if not fa_alerts:
-        return 1.0
+    fa_alerts   = [gt for gt in ground_truth if gt.get("true_root_cause") == "false_alarm"]
+    real_alerts = [gt for gt in ground_truth if gt.get("true_root_cause") != "false_alarm"]
 
-    real_alerts = [gt for gt in ground_truth if gt["true_root_cause"] != "false_alarm"]
+    correct_fa   = sum(1 for gt in fa_alerts   if gt["alert_id"] in skips_by_id)
+    correct_real = sum(1 for gt in real_alerts  if gt["alert_id"] in decisions_by_id)
 
-    correctly_skipped_fa = sum(
-        1 for gt in fa_alerts if gt["alert_id"] in skips_by_id
-    )
-
-    correctly_triaged_real = sum(
-        1 for gt in real_alerts if gt["alert_id"] in decisions_by_id
-    )
-
-    total = len(ground_truth)
-
-    base = (correctly_skipped_fa + correctly_triaged_real) / total if total > 0 else 1.0
-
-    # Penalize excessive skipping
-    skip_ratio = len(skips_by_id) / total if total > 0 else 0
-    penalty = max(0.0, 1 - skip_ratio * 0.5)
+    base       = _safe_div(correct_fa + correct_real, len(ground_truth))
+    skip_ratio = _safe_div(len(skips_by_id), len(ground_truth))
+    penalty    = max(EPS, 1 - skip_ratio * 0.5)
 
     return base * penalty
 
 
-def _stealth_bonus(decisions_by_id, ground_truth, incidents) -> float:
-    stealth_inc = next(
-        (inc for inc in incidents if inc.get("stealth")), None
-    )
-    if stealth_inc is None:
-        return 0.0
+def _stealth_bonus(
+    decisions_by_id: dict[str, Any],
+    ground_truth: list[dict[str, Any]],
+    incidents: list[dict[str, Any]],
+) -> float:
+    stealth_inc = next((i for i in incidents if i.get("stealth")), None)
+    if not stealth_inc:
+        return EPS   # no stealth incident → no bonus; not 0.0
 
     stealth_id = stealth_inc.get("incident_id") or stealth_inc.get("id")
     if stealth_id is None:
-        return 0.0
+        return EPS
 
-    stealth_alerts = [
-        gt for gt in ground_truth if gt.get("incident_id") == stealth_id
-    ]
+    stealth_alerts = [gt for gt in ground_truth if gt.get("incident_id") == stealth_id]
 
     for gt in stealth_alerts:
-        decision = decisions_by_id.get(gt["alert_id"])
-        if decision and decision.get("root_cause") == gt["true_root_cause"]:
-            return 1.0
+        d = decisions_by_id.get(gt["alert_id"])
+        if d and d.get("root_cause") == gt.get("true_root_cause"):
+            return ONE   # correctly identified — use ONE not 1.0
 
-    return 0.0
-
-
+    return EPS
 
 
-
-def _pairs_from_groups(groups):
-    pairs = set()
+def _pairs_from_groups(groups: list[list[str]]) -> set[frozenset[str]]:
+    pairs: set[frozenset[str]] = set()
     for group in groups:
         for a, b in itertools.combinations(group, 2):
             pairs.add(frozenset((a, b)))

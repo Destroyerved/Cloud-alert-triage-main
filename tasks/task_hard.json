@@ -10,11 +10,11 @@
   "max_steps": 45,
   "expected_score_range": [0.40, 0.70],
   "grader_weights": {
-    "root_cause_accuracy": 0.25,
-    "severity_accuracy": 0.20,
-    "remediation_accuracy": 0.15,
-    "incident_link_f1": 0.25,
-    "false_alarm_accuracy": 0.10,
+    "root_cause_accuracy": 0.24,
+    "severity_accuracy": 0.19,
+    "remediation_accuracy": 0.14,
+    "incident_link_f1": 0.24,
+    "false_alarm_accuracy": 0.14,
     "stealth_bonus": 0.05
   }
 }

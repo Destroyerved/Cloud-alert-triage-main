@@ -90,14 +90,20 @@ def compute_reward(
     else:
         # Unrecognised action_type -- defensive fallback (env catches bad types
         # before calling here, but guard anyway).
-        base = 0.0
+        base = 1e-4  # unrecognised action — epsilon not 0.0
 
     penalty = _penalty_budget(
         env_state_dict.get("step_number", 0),
         env_state_dict.get("max_steps", 1),
     )
 
-    return round(base + penalty, 6)
+    result = base + penalty
+    # Clamp: never return exactly 0.0 or 1.0
+    if result == 0.0:
+        result = 1e-4
+    elif result >= 1.0:
+        result = 1 - 1e-4
+    return round(result, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +131,7 @@ def _reward_triage(
     alert_id = action_dict.get("alert_id")
     gt = _find_gt(alert_id, ground_truth_list)
     if gt is None:
-        # No ground truth entry found -- cannot score.
-        return 0.0
+        return 1e-4  # no GT — return epsilon, not 0.0
 
     reward = 0.0
 
@@ -178,7 +183,7 @@ def _reward_link(
                      ``incident_id`` and ``alert_ids`` (list of member IDs).
     """
     if len(alert_ids) < 2:
-        return 0.0
+        return 1e-4  # degenerate link — return epsilon, not 0.0
 
     # Build alert_id -> incident_id lookup from ground truth.
     alert_to_incident: dict[str, str] = {}
@@ -211,10 +216,10 @@ def _reward_skip(
         -0.30  alert is a real (non-false-alarm) alert
     """
     if alert_id is None:
-        return 0.0
+        return 1e-4
     gt = _find_gt(alert_id, ground_truth_list)
     if gt is None:
-        return 0.0
+        return 1e-4
     if gt["true_root_cause"] == "false_alarm":
         return 0.20
     return -0.30
@@ -235,7 +240,7 @@ def _penalty_budget(step: int, max_steps: int) -> float:
     """
     if max_steps > 0 and step >= 0.8 * max_steps:
         return -0.05
-    return 0.0
+    return 1e-4  # epsilon instead of exact 0.0
 
 
 # ---------------------------------------------------------------------------
