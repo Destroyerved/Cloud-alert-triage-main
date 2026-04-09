@@ -288,6 +288,11 @@ Respond ONLY with valid JSON, no other text:
             parsed = json.loads(clean)
             if "score" not in parsed:
                 raise ValueError("missing score field")
+            # Clamp scores to ensure strictly between 0 and 1
+            parsed["score"] = max(0.01, min(0.99, parsed["score"]))
+            if "components" in parsed:
+                for k in parsed["components"]:
+                    parsed["components"][k] = max(0.0, min(1.0, parsed["components"][k]))
             return parsed
         except Exception:
             logger.warning("TriageJudge: failed to parse LLM response — using heuristic")
@@ -378,7 +383,7 @@ Respond ONLY with valid JSON, no other text:
         overall = sum(components[k] * weights[k] for k in weights)
 
         # Clamp strictly between 0 and 1
-        overall = max(1e-4, min(1.0 - 1e-4, overall))
+        overall = max(0.01, min(0.99, overall))
 
         # Build a concise feedback string
         weak = [k for k, v in components.items() if v < 0.6]

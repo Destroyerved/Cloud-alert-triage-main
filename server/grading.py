@@ -11,8 +11,8 @@ from server.config import SEVERITY_ORDER
 # Strict open-interval constants — score is ALWAYS in (EPS, 1-EPS)
 # ─────────────────────────────────────────────────────────────
 
-EPS = 1e-4          # minimum score (0.0001)
-ONE = 1 - 1e-4      # maximum score (0.9999)
+EPS = 0.01          # minimum score (0.01)
+ONE = 0.99          # maximum score (0.99)
 
 
 def _safe(x: float) -> float:
